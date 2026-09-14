@@ -1,1 +1,67 @@
-# MoviePilot-Plugins
+# MoviePilot V3 插件仓库
+
+个人自用的 [MoviePilot](https://wiki.movie-pilot.org) **V3** 插件仓库，可按「插件仓库」方式添加到 MoviePilot 中安装使用。
+
+## 包含的插件
+
+| 插件 ID | 名称 | 版本 | 说明 |
+| --- | --- | --- | --- |
+| `AudiencesSignIn` | 观众站点签到 | 1.1.0 | 自动完成观众（Audiences）等 NexusPHP 站点的每日签到，遇到人机验证时自动调用宿主浏览器通过验证 |
+
+## 目录结构
+
+MoviePilot V3 对插件仓库的目录结构有硬性要求，本仓库已按规范组织：
+
+```
+.
+├── package.v3.json                    # V3 插件索引（必须叫这个名字）
+├── icons/                             # 插件图标（package.v3.json 中 icon 字段的相对文件名）
+│   └── audiencessignin.png
+└── plugins.v3/                        # V3 插件源码目录（必须叫这个名字）
+    └── audiencessignin/               # 目录名 = 插件 ID 全小写
+        ├── __init__.py                # 插件主类
+        └── README.md
+```
+
+规则要点：
+
+- **仓库地址必须是 `github.com`**。MoviePilot 只接受 github.com 的仓库地址，Gitee 等其它平台会被直接拒绝。
+- **默认分支必须是 `main`**。MoviePilot 读取索引时分支名硬编码为 `main`，改为 `master` 会拉不到插件列表。
+- **仓库根目录必须有 `package.v3.json`**，它是 V3 的插件索引文件；插件源码放在 `plugins.v3/<插件ID小写>/`。
+- `package.v3.json` 中每个条目的 **key 就是插件 ID**（如 `AudiencesSignIn`），与源码目录名（全小写）一一对应。
+- 图标放在 `icons/`，在索引与插件类的 `plugin_icon` 中填**文件名**（不要填完整 URL）。
+- 仓库需为**公开仓库**（MoviePilot 通过 raw 域名读取，私有仓库未经配置无法读取）。
+
+## 在 MoviePilot 中添加本仓库
+
+1. 先把本仓库推送到你自己的 GitHub 账号（新建空仓库后推送，步骤见下方"推送方式"）。
+2. 打开 MoviePilot → **设定 → 插件 → 插件市场**，在"插件仓库"处添加：
+
+   ```
+   https://github.com/<你的用户名>/<仓库名>
+   ```
+
+3. 保存后刷新插件市场，即可看到"观众站点签到"，点击安装。
+4. 安装后到 **设定 → 服务** 手动执行一次，确认签到结果，再依赖定时任务。
+
+> **前置条件**：MoviePilot 需要能访问 `raw.githubusercontent.com`。若网络直连不通，必须在 MoviePilot 中配置 GitHub 加速镜像 —— 见 `推送与安装说明.md` 的"第 0 步"。
+
+## 推送方式
+
+见 `推送与安装说明.md`，包含三种方式：
+
+- 方式 A：GitHub 网页直接上传（零命令行依赖）
+- 方式 B：本机 git 推送（本目录已是初始化好的 git 仓库，只需 push）
+- 方式 C：使用 GitHub Token 通过 API 自动创建仓库并推送
+
+## 新增插件
+
+1. 在 `plugins.v3/` 下新建 `<新插件ID全小写>/` 目录并放入源码。
+2. 在 `package.v3.json` 中**追加**该插件的条目（key 为新插件 ID）。
+3. 图标放入 `icons/`，提交并推送。
+
+不要删除或覆盖其它插件的索引条目。
+
+## 许可
+
+MIT，见 `LICENSE`。
