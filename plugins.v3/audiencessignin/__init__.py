@@ -123,7 +123,7 @@ class AudiencesSignIn(_PluginBase):
         "支持定时执行、手动触发、结果通知与历史记录。"
     )
     plugin_icon = "audiencessignin.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "Energumen2tap"
     author_url = "https://github.com/Energumen2tap"
     plugin_config_prefix = "audiencessignin_"
@@ -1019,44 +1019,65 @@ class AudiencesSignIn(_PluginBase):
                 pass
 
             page.goto(target_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            self._log_browser_page(page, "首屏已加载")
             logger.info("【观众签到】  签到页已加载，开始轮询等待验证与签到结果 ……")
 
             deadline = time.time() + self._browser_wait
             last_state = "unknown"
             last_body = ""
+            last_url = ""
+            last_title = ""
+            first_state = ""
             tick = 0
             heartbeat = 0
+            evidence_logged = False
             while time.time() < deadline:
                 tick += 1
                 last_body = self._page_text(page)
+                last_url = self._safe_attr(page, "url")
+                last_title = self._safe_call(page, "title")
                 if any(marker in last_body for marker in SIGNED_MARKERS):
                     reward = self._extract_reward(last_body)
                     logger.info(f"【观众签到】  第 {tick} 次轮询检测到已签到标记")
                     return "success", f"签到成功{reward}"
                 if self._looks_like_login(last_body, ""):
                     logger.warning(f"【观众签到】  第 {tick} 次轮询检测到跳转登录页")
+                    self._log_browser_page(page, "跳转登录页")
                     return "failed", "浏览器加载后跳转到登录页，Cookie 已失效"
                 if any(marker in last_body for marker in NEED_VERIFY_MARKERS):
                     last_state = "need_verify"
                 elif self._looks_like_cloudflare(last_body):
                     last_state = "cloudflare"
+                else:
+                    last_state = "unknown"
+                if not first_state:
+                    first_state = last_state
+                    # 首次判定即留证据：URL / 标题 / 文本片段，便于定位到底看到了什么
+                    self._log_browser_page(page, f"首轮判定 {last_state}")
+                    evidence_logged = True
                 # 每 15 秒输出一次心跳，避免长时间静默让人以为卡死
                 elapsed = int(time.time() - (deadline - self._browser_wait))
                 if elapsed - heartbeat >= 15:
                     heartbeat = elapsed
                     logger.info(
                         f"【观众签到】  等待中 …… 已用 {elapsed}s / 上限 {self._browser_wait}s"
-                        f"（当前页面状态：{last_state}）"
+                        f"（当前页面状态：{last_state}，地址：{last_url}）"
                     )
                 time.sleep(3)
 
+            if not evidence_logged:
+                self._log_browser_page(page, f"超时终态 {last_state}")
+            logger.error(
+                f"【观众签到】  超时诊断：状态={last_state}｜地址={last_url}｜标题={last_title}"
+            )
             if last_state == "need_verify":
                 logger.error(
                     f"【观众签到】  ⏱️ {self._browser_wait}s 内人机验证未通过"
                     f"（已轮询 {tick} 次）"
                 )
                 return ("failed",
-                        f"已加载签到页但 {self._browser_wait}s 内人机验证未通过；"
+                        f"已加载签到页但 {self._browser_wait}s 内人机验证未通过"
+                        f"（地址：{last_url or target_url}）；"
                         "可尝试切换为「仅有头」模式或延长等待时间")
             if last_state == "cloudflare":
                 logger.error(f"【观众签到】  ⏱️ {self._browser_wait}s 内未通过 Cloudflare 质询")
@@ -1089,6 +1110,10 @@ class AudiencesSignIn(_PluginBase):
 
         官方指南示例：``with launch_browser_context(cookies=..., browser_type="chromium") as ctx``
         但不同版本接受的参数集合可能不同，故此处按「从全到简」逐级回退。
+
+        注意：宿主 ``launch_browser_context`` 会把其余参数**原样透传**给 CloakBrowser，
+        被拒绝时会抛 ``TypeError``。若降到"不带 cookies"的组合才成功，
+        说明本次启动**没有**携带登录态，必须显式告警（否则页面只会停在未登录态）。
         """
         optional: Dict[str, Any] = {}
         if cookie:
@@ -1105,10 +1130,23 @@ class AudiencesSignIn(_PluginBase):
             kwargs = {k: optional[k] for k in keys[: len(keys) - drop]}
             kwargs["headless"] = headless
             try:
-                return launcher(**kwargs)
+                context = launcher(**kwargs)
             except TypeError as err:
                 last_error = err
-                logger.debug(f"【观众签到】launch_browser_context 不接受参数组合 {list(kwargs)}：{err}")
+                logger.debug(
+                    f"【观众签到】launch_browser_context 不接受参数组合 {list(kwargs)}：{err}"
+                )
+                continue
+            dropped = keys[len(keys) - drop:]
+            if "cookies" in dropped:
+                logger.warning(
+                    "【观众签到】  ⚠️ 宿主浏览器拒绝了 cookies 启动参数，"
+                    "本次将不带登录态启动（页面可能停在登录页或验证页）；"
+                    "已改用页面级请求头注入尝试补上"
+                )
+            elif dropped:
+                logger.warning(f"【观众签到】  宿主浏览器忽略了启动参数：{dropped}")
+            return context
         raise last_error if last_error else RuntimeError("无法启动浏览器上下文")
 
     @staticmethod
@@ -1132,6 +1170,47 @@ class AudiencesSignIn(_PluginBase):
             except Exception:  # noqa: BLE001 - 页面切换中读取失败属常见情况
                 continue
         return ""
+
+    @staticmethod
+    def _safe_attr(page: Any, name: str) -> str:
+        """安全读取页面属性（当前地址等），失败返回空字符串。"""
+        try:
+            value = getattr(page, name, "")
+            return str(value() if callable(value) else value or "")
+        except Exception:  # noqa: BLE001 - 页面切换中读取失败属常见情况
+            return ""
+
+    @staticmethod
+    def _safe_call(page: Any, name: str) -> str:
+        """安全调用页面无参方法并返回字符串结果。"""
+        try:
+            return str(getattr(page, name)() or "")
+        except Exception:  # noqa: BLE001 - 非关键能力，缺失可忽略
+            return ""
+
+    def _log_browser_page(self, page: Any, label: str) -> None:
+        """把浏览器当前页面的关键证据写入日志，用于定位「浏览器到底看到了什么」。
+
+        记录：地址、标题、判定命中的关键词、正文片段。
+        """
+        try:
+            url = self._safe_attr(page, "url")
+            title = self._safe_call(page, "title")
+            body = self._page_text(page)
+            hits = [
+                marker
+                for group in (SIGNED_MARKERS, NEED_VERIFY_MARKERS, LOGIN_MARKERS, CF_MARKERS)
+                for marker in group
+                if marker.lower() in body.lower()
+            ]
+            snippet = (body or "")[:180].replace("\n", " ").strip()
+            logger.info(
+                f"【观众签到】  [{label}] 地址={url or '(未知)'}｜标题={title or '(空)'}"
+                f"｜命中关键词={hits or '无'}｜正文长度={len(body)}"
+            )
+            logger.info(f"【观众签到】  [{label}] 正文片段：{snippet or '(空)'}")
+        except Exception as err:  # noqa: BLE001 - 诊断失败不影响主流程
+            logger.debug(f"【观众签到】记录浏览器页面证据失败：{err}")
 
     # ------------------------------------------------------------ 工具方法
 
