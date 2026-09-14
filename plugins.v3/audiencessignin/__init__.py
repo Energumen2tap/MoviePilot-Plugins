@@ -123,7 +123,7 @@ class AudiencesSignIn(_PluginBase):
         "支持定时执行、手动触发、结果通知与历史记录。"
     )
     plugin_icon = "audiencessignin.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     plugin_author = "Energumen2tap"
     author_url = "https://github.com/Energumen2tap"
     plugin_config_prefix = "audiencessignin_"
@@ -143,6 +143,7 @@ class AudiencesSignIn(_PluginBase):
     _use_browser: bool = True
     _browser_mode: str = BROWSER_MODE_AUTO
     _browser_wait: int = 60
+    _forward_ua: bool = True
 
     def __init__(self) -> None:
         """初始化，保持与宿主基类一致。"""
@@ -163,6 +164,7 @@ class AudiencesSignIn(_PluginBase):
         self._cookie_override = str(config.get("cookie") or "").strip()
         self._ua_override = str(config.get("ua") or "").strip()
         self._use_browser = bool(config.get("use_browser", True))
+        self._forward_ua = bool(config.get("forward_ua", True))
         mode = str(config.get("browser_mode") or "").strip().lower()
         self._browser_mode = (
             mode
@@ -480,6 +482,49 @@ class AudiencesSignIn(_PluginBase):
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "forward_ua",
+                                            "label": "强制用站点登记的 UA 打开浏览器",
+                                            "hint": (
+                                                "推荐开启。NexusPHP 会话 Cookie 与 "
+                                                "cf_clearance 都绑定 UA，浏览器自带指纹 UA "
+                                                "与登记 UA 不一致时，会话会被判无效，"
+                                                "表现为一直卡在人机验证页。"
+                                            ),
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "text": (
+                                                "签到日志中的「浏览器 UA 与站点登记 UA 不一致」"
+                                                "告警出现时，务必开启此项。"
+                                            ),
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cookie",
@@ -611,6 +656,7 @@ class AudiencesSignIn(_PluginBase):
             "use_browser": True,
             "browser_mode": BROWSER_MODE_AUTO,
             "browser_wait": 60,
+            "forward_ua": True,
             "cookie": "",
             "ua": "",
         }
@@ -687,7 +733,8 @@ class AudiencesSignIn(_PluginBase):
         logger.info(f"【观众签到】开始时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"【观众签到】签到站点：{'、'.join(self._sites)}")
         logger.info(f"【观众签到】浏览器调用：{'允许' if self._use_browser else '禁用'}"
-                    f"（模式 {self._browser_mode}，等待 {self._browser_wait}s）")
+                    f"（模式 {self._browser_mode}，等待 {self._browser_wait}s，"
+                    f"UA 跟随站点：{'开' if self._forward_ua else '关'}）")
         logger.info("=" * 52)
 
         results: List[Dict[str, Any]] = []
@@ -1011,7 +1058,11 @@ class AudiencesSignIn(_PluginBase):
             pages = getattr(context, "pages", None) or []
             page = pages[0] if pages else context.new_page()
 
+            # Cookie 必须在导航前写入浏览器 cookie 罐（Turnstile 与站点会话依赖它，
+            # 仅设请求头对已发起的挑战无效），页面级请求头作为补充。
+            self._install_cookies(context, target_url, cookie)
             self._inject_cookie(page, cookie)
+            self._log_ua_consistency(context, page, ua)
 
             try:
                 page.set_default_timeout(timeout * 1000)
@@ -1109,45 +1160,156 @@ class AudiencesSignIn(_PluginBase):
         """按宿主稳定 SDK 启动浏览器上下文，并兼容不同版本的参数签名。
 
         官方指南示例：``with launch_browser_context(cookies=..., browser_type="chromium") as ctx``
-        但不同版本接受的参数集合可能不同，故此处按「从全到简」逐级回退。
+        但不同版本接受的参数集合可能不同，故此处逐级回退。
 
-        注意：宿主 ``launch_browser_context`` 会把其余参数**原样透传**给 CloakBrowser，
-        被拒绝时会抛 ``TypeError``。若降到"不带 cookies"的组合才成功，
-        说明本次启动**没有**携带登录态，必须显式告警（否则页面只会停在未登录态）。
+        **关键顺序**：宿主 ``launch_browser_context`` 把其余参数**原样透传**给 CloakBrowser，
+        被拒绝时抛 ``TypeError``。实测该版本**不接受 ``cookies``**（详见下方告警），
+        因此 cookie 改由 ``_install_cookies`` 在导航前写入浏览器 cookie 罐 —— 这里仍尝试传参，
+        传得进去最好，传不进也不影响登录态。``browser_type`` 经源码核实**不被消费**，放最后试。
         """
-        optional: Dict[str, Any] = {}
+        # 顺序即优先级：先试能力最强的组合，逐级降级时优先保留 cookie 相关参数。
+        candidates: List[Dict[str, Any]] = []
+        base: Dict[str, Any] = {"headless": headless}
         if cookie:
-            optional["cookies"] = cookie
-        if ua:
-            optional["user_agent"] = ua
+            base["cookies"] = cookie
+        # UA 决定会话 Cookie 是否被判有效：默认跟随站点登记的 UA（可用开关关闭）
+        if ua and self._forward_ua:
+            base["user_agent"] = ua
         if proxies:
-            optional["proxy"] = proxies
-        optional["browser_type"] = "chromium"
+            base["proxy"] = proxies
+        candidates.append(dict(base))
+        # 去掉 cookies（由 cookie 罐注入兜底）
+        no_cookie = {k: v for k, v in base.items() if k != "cookies"}
+        if no_cookie != base:
+            candidates.append(no_cookie)
+        # 再去掉 UA 之外的附加项
+        candidates.append({"headless": headless})
+        # 最后才试 browser_type（源码核实 launch_browser_context 不消费它）
+        candidates.append({"headless": headless, "browser_type": "chromium"})
 
-        keys = list(optional.keys())
         last_error: Optional[Exception] = None
-        for drop in range(len(keys) + 1):
-            kwargs = {k: optional[k] for k in keys[: len(keys) - drop]}
-            kwargs["headless"] = headless
+        tried: List[List[str]] = []
+        for kwargs in candidates:
+            keys = sorted(kwargs)
+            if keys in tried:
+                continue
+            tried.append(keys)
             try:
                 context = launcher(**kwargs)
             except TypeError as err:
                 last_error = err
                 logger.debug(
-                    f"【观众签到】launch_browser_context 不接受参数组合 {list(kwargs)}：{err}"
+                    f"【观众签到】launch_browser_context 不接受参数组合 {keys}：{err}"
                 )
                 continue
-            dropped = keys[len(keys) - drop:]
-            if "cookies" in dropped:
+            if cookie and "cookies" not in kwargs:
                 logger.warning(
                     "【观众签到】  ⚠️ 宿主浏览器拒绝了 cookies 启动参数，"
-                    "本次将不带登录态启动（页面可能停在登录页或验证页）；"
-                    "已改用页面级请求头注入尝试补上"
+                    "改由浏览器 cookie 罐注入登录态（若不生效页面会停在验证页）"
                 )
-            elif dropped:
-                logger.warning(f"【观众签到】  宿主浏览器忽略了启动参数：{dropped}")
             return context
         raise last_error if last_error else RuntimeError("无法启动浏览器上下文")
+
+    @staticmethod
+    def _log_ua_consistency(context: Any, page: Any, ua: str) -> None:
+        """核对浏览器实际 UA 与站点登记的 UA 是否一致。
+
+        NexusPHP 的会话 Cookie（``c_secure_uid`` 等）与 Cloudflare 的 ``cf_clearance``
+        **都绑定 User-Agent**。浏览器用自己的指纹 UA 打开、而 Cookie 是用站点登记的 UA
+        申请的话，服务端会判为会话无效 → 表现就是"一直停在人机验证/登录页"。
+        这里把差异显式打出来，避免此类问题再次被误判为"验证码过不去"。
+        """
+        if not ua:
+            return
+        try:
+            actual = ""
+            try:
+                actual = str(page.evaluate("() => window.navigator.userAgent") or "")
+            except Exception:  # noqa: BLE001 - 取不到就算了
+                actual = ""
+            if not actual:
+                return
+            if actual.strip() == ua.strip():
+                logger.info("【观众签到】  浏览器 UA 与站点登记 UA 一致（会话 Cookie 可正常生效）")
+            else:
+                logger.warning(
+                    "【观众签到】  ⚠️ 浏览器 UA 与站点登记 UA **不一致**，"
+                    "会话 Cookie / cf_clearance 可能被判无效（这会直接导致卡在人机验证页）\n"
+                    f"【观众签到】     站点登记：{ua[:120]}\n"
+                    f"【观众签到】     浏览器实际：{actual[:120]}"
+                )
+        except Exception as err:  # noqa: BLE001 - 诊断失败不影响主流程
+            logger.debug(f"【观众签到】核对 UA 一致性失败：{err}")
+
+    def _install_cookies(self, context: Any, target_url: str, cookie: str) -> None:
+        """把站点 Cookie 写入浏览器 cookie 罐（导航前调用）。
+
+        这是让浏览器**处于登录态**的关键一步：
+        ``page.set_extra_http_headers`` 只影响后续请求头，而 Turnstile 与站点会话
+        依赖的是浏览器 cookie 罐，且对**已发起**的挑战无效 —— 必须在 goto 之前写入。
+
+        先用 Playwright 原生 ``context.add_cookies`` 逐条添加；失败后退回
+        ``context.add_cookies`` 的 dict 形式，再失败退回页面级请求头（由调用方兜底）。
+        """
+        if not cookie:
+            return
+        parsed = self._parse_cookie_header(cookie)
+        if not parsed:
+            logger.warning("【观众签到】  ⚠️ 站点 Cookie 无法解析，浏览器可能处于未登录态")
+            return
+        try:
+            from urllib.parse import urlparse
+
+            host = urlparse(target_url).hostname or ""
+            domain = f".{host}" if host and "." in host else host
+            jar = [
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": domain,
+                    "path": "/",
+                    "secure": target_url.startswith("https://"),
+                }
+                for name, value in parsed.items()
+            ]
+            try:
+                context.add_cookies(jar)
+                logger.info(
+                    f"【观众签到】  已将 {len(jar)} 条 Cookie 写入浏览器 cookie 罐"
+                    f"（域名 {domain}），浏览器将以登录态访问"
+                )
+                return
+            except TypeError:
+                # 部分实现只接受无 domain 的简表
+                context.add_cookies(
+                    [{"name": n, "value": v} for n, v in parsed.items()]
+                )
+                logger.info(
+                    f"【观众签到】  已将 {len(parsed)} 条 Cookie 写入浏览器 cookie 罐（简表形式）"
+                )
+                return
+        except Exception as err:  # noqa: BLE001 - 失败仍可依赖页面级请求头
+            logger.warning(
+                f"【观众签到】  ⚠️ 写入浏览器 cookie 罐失败：{err}；"
+                "退回页面级请求头注入（对验证挑战可能无效）"
+            )
+
+    @staticmethod
+    def _parse_cookie_header(cookie: str) -> Dict[str, str]:
+        """把 ``a=1; b=2`` 形式的 Cookie 请求头解析成字典。
+
+        值中可能含 ``=``（如 base64 填充），故只按第一个 ``=`` 切分。
+        """
+        parsed: Dict[str, str] = {}
+        for chunk in (cookie or "").split(";"):
+            item = chunk.strip()
+            if not item or "=" not in item:
+                continue
+            name, _, value = item.partition("=")
+            name = name.strip()
+            if name:
+                parsed[name] = value.strip()
+        return parsed
 
     @staticmethod
     def _inject_cookie(page: Any, cookie: str) -> None:
