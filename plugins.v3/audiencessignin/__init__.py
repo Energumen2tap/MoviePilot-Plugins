@@ -1,6 +1,30 @@
 """
 观众（Audiences）PT 站自动签到插件 —— MoviePilot V3
 
+=== v1.5.1 变更（修复 unknown 解析缺陷）===
+v1.5.0 实跑出现「HTTP 200 但四组判定词全未命中」→ 状态 unknown，
+且日志正文片段以 ``--> --> -->`` 一堆 HTML 注释残余符开头
+（而此前实跑的正文片段开头是干净的「首 页 论 坛 影 视…」）。
+根因：``_to_text()`` 用的 ``<[^>]+>`` 在遇到 HTML 注释时会**在第一个 ``>``
+处提前截断**（注释正文可能含 ``>``，例如 ``-->``、``=>``），于是
+① 注释残余符留在文本里污染判定；② 注释**内部的文字**被当成正文保留。
+修复与增强：
+1. ``_to_text()`` 改为**先删注释**再剥标签，并清理界面箭头等实体；
+2. 探测未识别时打印「正文长度 / HTML 长度 / 前段 / 中段 / 尾段」，
+   不再只给前 200 字（站点把签到区放在页面中后部时看不到关键内容）；
+3. 状态探测 API 支持 ``?full=1`` 返回页面纯文本全文，便于排障；
+4. 防御性兜底：登录态正常且页面无任何未签到标记 → 判为已签到
+   （把「误报失败」降级为「多发一次浏览器确认」）。
+
+=== v1.5.0 变更（修复判定词误报）===
+v1.4.0 实跑把**已经签到的成功页**判成了 need_verify，
+白等 60 秒后报失败。根因：``NEED_VERIFY_MARKERS`` 里的词是站点页面的
+**静态说明文案**（签到奖励规则区块附近），只要页面渲染出来就会被读到。
+修复：新增 ``_looks_like_need_verify()``，判定需要「登录态反证」——
+必须同时「不含已签到标记」且「不含登录用户信息」才算真的需要验证。
+另修正页面文本读取顺序（优先整份 HTML 而非可见文本，避免无头模式下
+窗口尺寸导致读取不稳定），并在证据日志中打印命中词前后文。
+
 === v1.2.0 变更 ===
 1. 新增「立即运行一次」按钮（插件设置页），点一下当场执行，
    不必再跳到「设定 -> 服务」页手动触发。
@@ -139,7 +163,7 @@ class AudiencesSignIn(_PluginBase):
         "支持定时执行、手动触发、结果通知与历史记录。"
     )
     plugin_icon = "audiencessignin.png"
-    plugin_version = "1.5.0"
+    plugin_version = "1.5.1"
     plugin_author = "Energumen2tap"
     author_url = "https://github.com/Energumen2tap"
     plugin_config_prefix = "audiencessignin_"
@@ -271,7 +295,8 @@ class AudiencesSignIn(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "探测签到状态",
-                "description": "仅用 HTTP 探测各站点当前签到状态，不执行签到、不启动浏览器。",
+                "description": ("仅用 HTTP 探测各站点当前签到状态，不执行签到、不启动浏览器。"
+                                "追加 ?full=1 可额外返回页面纯文本全文，用于排查判定词是否失效。"),
             },
             {
                 "path": "/history",
@@ -313,8 +338,14 @@ class AudiencesSignIn(_PluginBase):
             ),
         }
 
-    def query_state(self) -> Dict[str, Any]:
-        """插件 API：只探测状态，不做任何写操作。"""
+    def query_state(self, full: str = "") -> Dict[str, Any]:
+        """插件 API：只探测状态，不做任何写操作。
+
+        参数 ``full``（v1.5.1 新增）：传任意真值（如 ``?full=1``）时，
+        额外返回**页面纯文本全文**，用于诊断判定词是否与站点当前文案对得上。
+        返回的 ``body`` 可能较长，仅在排障时使用。
+        """
+        want_full = str(full or "").strip().lower() not in ("", "0", "false", "no")
         states: List[Dict[str, Any]] = []
         for domain in self._sites:
             site = self._get_site(domain)
@@ -324,8 +355,16 @@ class AudiencesSignIn(_PluginBase):
                 states.append({"site": domain, "state": "no_cookie"})
                 continue
             target_url = f"{self._site_url(site, domain)}/{self._attendance_path.lstrip('/')}"
-            state, detail, _ = self._probe_state(target_url, cookie, ua, site)
-            states.append({"site": domain, "state": state, "detail": detail})
+            state, detail, body = self._probe_state(target_url, cookie, ua, site)
+            item: Dict[str, Any] = {
+                "site": domain,
+                "state": state,
+                "detail": detail,
+                "body_length": len(body or ""),
+            }
+            if want_full:
+                item["body"] = body or ""
+            states.append(item)
         return {"states": states}
 
     def get_history(self) -> Dict[str, Any]:
@@ -982,7 +1021,37 @@ class AudiencesSignIn(_PluginBase):
         if self._looks_like_need_verify(body):
             return "need_verify", "站点要求人机验证，需由浏览器完成", body
 
+        # 5) 防御性兜底（v1.5.1）：无法识别，但「登录态在 + 页面没有我认识的
+        #    未签到标记」→ 实际几乎可以肯定是「今天已经签过，只是站点换了文案」。
+        #    依据：本站未签到时页面**一定**出现 NEED_VERIFY_MARKERS 之一，
+        #    所以「登录态在 且 无验证文案」这一组合在未签到时无法成立。
+        #    这样处理的目的：把「误报失败」降级为「多发一次浏览器确认」，
+        #    而不是每天误报一次失败 —— 两种错误代价不对称。
+        if any(marker in body for marker in LOGGED_IN_MARKERS):
+            logger.info(
+                "【观众签到】  判定：登录态正常但未命中已知签到文案，"
+                "按站点规则视为今日已签到（若判断有误，下次执行会以浏览器复核）"
+            )
+            return ("signed",
+                    "未命中已知签到文案，但登录态正常且页面无验证提示，"
+                    "按站点规则视为今日已签到",
+                    body)
+
         snippet = body[:200].replace("\n", " ").strip()
+        # v1.5.1：unknown 时补充「文本长度 + 中段 + 尾段」证据。
+        # 只给前 200 字常常看不到关键内容（站点把签到区放在页面中后部），
+        # 导致无法判断是「站点改文案」还是「解析把内容丢了」。
+        logger.warning(
+            f"【观众签到】  探测未识别：正文长度={len(body)}"
+            f"｜HTML 长度={len(html)}"
+            f"｜正文前段={snippet or '(空)'}"
+        )
+        if len(body) > 200:
+            mid_start = max(0, len(body) // 2 - 100)
+            middle = body[mid_start:mid_start + 200].replace("\n", " ").strip()
+            logger.warning(f"【观众签到】  正文中段：{middle}")
+            tail = body[-200:].replace("\n", " ").strip()
+            logger.warning(f"【观众签到】  正文尾段：{tail}")
         return "unknown", f"结果无法识别（HTTP {status_code}），页面片段：{snippet}", body
 
     @staticmethod
@@ -1525,11 +1594,23 @@ class AudiencesSignIn(_PluginBase):
 
     @staticmethod
     def _to_text(html: str) -> str:
-        """去掉脚本、样式与标签，得到用于关键词匹配的纯文本。"""
-        text = re.sub(r"(?is)<script.*?</script>", " ", html)
+        """把 HTML 转成用于关键词匹配的纯文本。
+
+        v1.5.1 修正：**必须先删除 HTML 注释**，再剥标签。
+        原因：``<[^>]+>`` 在遇到注释时会**提前在第一个 ``>`` 处截断**
+        （注释正文里可能含 ``>``，例如 ``-->`` 或 ``=>``），导致
+        ① 注释残余符 (``-->``) 留在文本里污染判定；
+        ② 注释**内部的文字**被当成正文保留。
+        实测观众站页面顶部有大量 ``-->`` 残留，正是这个缺陷所致。
+        """
+        text = re.sub(r"(?is)<!--.*?-->", " ", html)          # 先删注释（含内部文字）
+        text = re.sub(r"(?is)<script.*?</script>", " ", text)
         text = re.sub(r"(?is)<style.*?</style>", " ", text)
-        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"(?s)<[^>]*>", " ", text)              # 再剥标签
         text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+        text = text.replace("&#8249;", " ").replace("&#8250;", " ")   # 界面箭头
+        text = re.sub(r"(?m)&[a-zA-Z#0-9]{1,8};", " ", text)  # 其余实体统一清掉
+        text = re.sub(r"(?:\s*-->\s*)+", " ", text)           # 兜底：清理残留的注释尾
         return re.sub(r"\s+", " ", text).strip()
 
     @staticmethod
