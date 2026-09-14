@@ -1,6 +1,17 @@
 """
 观众（Audiences）PT 站自动签到插件 —— MoviePilot V3
 
+=== v1.2.0 变更 ===
+1. 新增「立即运行一次」按钮（插件设置页），点一下当场执行，
+   不必再跳到「设定 -> 服务」页手动触发。
+2. 日志改为「分节 + 结论先行」结构，一眼即可判断执行是否正常：
+   * 执行头：触发方式 / 开始时间 / 站点 / 浏览器配置；
+   * 每站按 [步骤 1/3] [步骤 2/3] [步骤 3/3] 打印，每步都带明确结果；
+   * 每站一行「结论：✅ 成功 / ✅ 今日已签到 / ❌ 失败 —— 原因」；
+   * 结尾统一打印「执行结果总览」+ 总结论；
+   * 浏览器等待期间每 15 秒输出心跳，避免静默让人以为卡死。
+3. 作者名由占位值「本地自建」改为 GitHub 名 Energumen2tap。
+
 === v1.1.0 重要变更（基于真实站点实测）===
 本站签到已改为「人机验证门控」：未签到时 attendance.php 会渲染
 「完成人机验证即可领取今日爆米花奖励 / 验证通过后将自动完成签到」，
@@ -112,9 +123,9 @@ class AudiencesSignIn(_PluginBase):
         "支持定时执行、手动触发、结果通知与历史记录。"
     )
     plugin_icon = "audiencessignin.png"
-    plugin_version = "1.1.0"
-    plugin_author = "本地自建"
-    author_url = "https://wiki.movie-pilot.org"
+    plugin_version = "1.2.0"
+    plugin_author = "Energumen2tap"
+    author_url = "https://github.com/Energumen2tap"
     plugin_config_prefix = "audiencessignin_"
     plugin_order = 50
     auth_level = 1
@@ -231,7 +242,7 @@ class AudiencesSignIn(_PluginBase):
             {
                 "path": "/run",
                 "endpoint": self.run_now,
-                "methods": ["GET"],
+                "methods": ["GET", "POST"],
                 "auth": "bear",
                 "summary": "立即执行签到",
                 "description": "对所有已配置站点立即执行一次签到，并返回本次结果摘要。",
@@ -255,11 +266,33 @@ class AudiencesSignIn(_PluginBase):
         ]
 
     def run_now(self) -> Dict[str, Any]:
-        """插件 API：立即签到。"""
-        results = self.sign_in_all(trigger="api")
+        """插件 API：立即签到。
+
+        供前端「立即运行一次」按钮与外部脚本调用。
+        无论成功失败都返回结构化结果，便于前端直接弹窗展示；
+        异常也在此处兜住，避免前端收到 500 而无法给出提示。
+        """
+        try:
+            results = self.sign_in_all(trigger="api")
+        except Exception as err:  # noqa: BLE001 - 保证前端总能拿到可读结果
+            logger.error(f"【观众签到】立即运行异常：{err}")
+            return {"success": False, "results": [], "message": f"执行异常：{err}"}
+
+        if not results:
+            return {
+                "success": False,
+                "results": [],
+                "message": "未配置签到站点，未执行任何操作",
+            }
+
+        failed = [item for item in results if not item.get("success")]
         return {
-            "success": all(item["success"] for item in results) if results else False,
+            "success": not failed,
             "results": results,
+            "message": (
+                f"存在 {len(failed)} 个失败项" if failed
+                else "全部站点执行成功"
+            ),
         }
 
     def query_state(self) -> Dict[str, Any]:
@@ -480,6 +513,62 @@ class AudiencesSignIn(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [
                                     {
+                                        "component": "VBtn",
+                                        "props": {
+                                            "color": "primary",
+                                            "variant": "tonal",
+                                            "block": True,
+                                            "prepend-icon": "mdi-play-circle-outline",
+                                            "onclick": (
+                                                "function(e) {"
+                                                "  var m = '（日志中查看执行详情）';"
+                                                "  window.MoviePilotAPI.post('plugin/AudiencesSignIn/run', {})"
+                                                "    .then(function(r) {"
+                                                "      var res = (r && r.results) || [];"
+                                                "      var lines = res.map(function(i) {"
+                                                "        return (i.success ? '[OK] ' : '[FAIL] ') + i.site + ': ' + i.message;"
+                                                "      });"
+                                                "      alert('已执行一次签到\\n\\n' + (lines.length ? lines.join('\\n') : m)"
+                                                "        + '\\n\\n详细过程见日志（筛选：观众签到）');"
+                                                "    })"
+                                                "    .catch(function(err) {"
+                                                "      console.error(err);"
+                                                "      alert('执行失败，详见日志\\n' + err);"
+                                                "    });"
+                                                "}"
+                                            ),
+                                        },
+                                        "text": "立即运行一次",
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "text": "点击上方按钮立即执行一次签到，结果会弹出提示，"
+                                                    "并写入日志（设定 -> 日志，筛选「观众签到」）"
+                                                    "——日志中有分步进度与总结论，可据此判断是否正常。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
                                         "component": "VAlert",
                                         "props": {
                                             "type": "info",
@@ -554,7 +643,8 @@ class AudiencesSignIn(_PluginBase):
                     "props": {
                         "type": "info",
                         "variant": "tonal",
-                        "text": "暂无签到记录。可在「设定 -> 服务」页手动执行一次，或等待定时任务触发。",
+                        "text": "暂无签到记录。可在插件设置页点击「立即运行一次」，"
+                                "或到「设定 -> 服务」手动执行，也可等待定时任务触发。",
                     },
                 }
             )
@@ -576,17 +666,68 @@ class AudiencesSignIn(_PluginBase):
     # ------------------------------------------------------------ 核心逻辑
 
     def sign_in_all(self, trigger: str = "schedule") -> List[Dict[str, Any]]:
-        """对所有配置站点执行签到，返回本次结果列表。"""
+        """对所有配置站点执行签到，返回本次结果列表。
+
+        日志采用「分节 + 结论先行」结构，便于从日志一眼判断执行是否正常：
+        开头打印执行头，每站打印分节与结论行，结束打印总览结论。
+        """
         if not self._sites:
             logger.warning("【观众签到】未配置签到站点，已跳过执行")
             return []
 
-        logger.info(
-            f"【观众签到】开始执行签到（触发方式：{trigger}），站点：{'、'.join(self._sites)}"
-        )
+        trigger_text = {
+            "schedule": "定时任务",
+            "api": "手动触发（立即运行）",
+            "command": "远程命令",
+        }.get(trigger, trigger)
+
+        logger.info("=" * 52)
+        logger.info("【观众签到】开始执行")
+        logger.info(f"【观众签到】触发方式：{trigger_text}")
+        logger.info(f"【观众签到】开始时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"【观众签到】签到站点：{'、'.join(self._sites)}")
+        logger.info(f"【观众签到】浏览器调用：{'允许' if self._use_browser else '禁用'}"
+                    f"（模式 {self._browser_mode}，等待 {self._browser_wait}s）")
+        logger.info("=" * 52)
+
         results: List[Dict[str, Any]] = []
-        for domain in self._sites:
+        for index, domain in enumerate(self._sites, start=1):
+            logger.info(f"----- 第 {index}/{len(self._sites)} 个站点：{domain} -----")
             results.append(self.sign_in_one(domain))
+
+        # ------- 总览结论：这是"一眼判断"的核心 -------
+        logger.info("=" * 52)
+        logger.info("【观众签到】执行结果总览")
+        for item in results:
+            mark = "✅ 成功" if item.get("success") else "❌ 失败"
+            logger.info(
+                f"【观众签到】  {mark} | {item.get('site')} | "
+                f"{item.get('status')} | {item.get('message')}"
+            )
+
+        failed = [item for item in results if not item.get("success")]
+        signed = [item for item in results if item.get("status") == "success"]
+        already = [item for item in results if item.get("status") == "already"]
+
+        logger.info("-" * 52)
+        if failed:
+            logger.error(
+                f"【观众签到】结论：本次执行存在 {len(failed)} 个失败项，"
+                f"共处理 {len(results)} 个站点"
+            )
+        elif signed:
+            logger.info(
+                f"【观众签到】结论：✅ 签到成功 {len(signed)} 个站点"
+                + (f"，另有 {len(already)} 个站点此前已签到" if already else "")
+            )
+        elif already:
+            logger.info(
+                f"【观众签到】结论：✅ 今日已签到（{len(already)} 个站点），无需重复签到"
+            )
+        else:
+            logger.info(f"【观众签到】结论：本次执行完成，共处理 {len(results)} 个站点")
+        logger.info(f"【观众签到】结束时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 52)
 
         if self._notify:
             self._post_result(results)
@@ -596,12 +737,16 @@ class AudiencesSignIn(_PluginBase):
         return results
 
     def sign_in_one(self, domain: str) -> Dict[str, Any]:
-        """对单个站点执行签到，返回结果字典。"""
+        """对单个站点执行签到，返回结果字典。
+
+        日志按 [1/3] [2/3] [3/3] 分步打印，每步都带明确结果，便于定位卡在哪一环。
+        """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if self._skip_if_done and self._signed_today(domain):
             message = "今天已签到成功，已跳过"
-            logger.info(f"【观众签到】{domain} {message}")
+            logger.info(f"【观众签到】[{domain}] 步骤 1/3：检查本地历史 → 今日已有成功记录")
+            logger.info(f"【观众签到】[{domain}] 结论：⏭️ {message}")
             return {"site": domain, "success": True, "status": "skipped",
                     "message": message, "time": now}
 
@@ -610,26 +755,52 @@ class AudiencesSignIn(_PluginBase):
         ua = self._ua_override or self._attr(site, "ua")
         site_url = self._site_url(site, domain)
 
+        logger.info(f"【观众签到】[{domain}] 步骤 1/3：读取站点配置")
+        if site is None:
+            logger.warning(
+                f"【观众签到】[{domain}] 步骤 1/3 提示："
+                f"未能从「站点管理」读取到该站点记录（站点可能未添加或域名不匹配）"
+            )
         if not cookie:
             message = ("未取到站点 Cookie：请在 MoviePilot「站点管理」中添加/更新该站点，"
                        "或在插件中填写 Cookie 覆盖")
-            logger.error(f"【观众签到】{domain} {message}")
+            if site is None:
+                message = ("未能读取站点配置：请确认已在 MoviePilot「站点管理」中添加 "
+                           f"{domain}，且域名与该站点登记的域名一致")
+            logger.error(f"【观众签到】[{domain}] 步骤 1/3 失败：{message}")
+            logger.error(f"【观众签到】[{domain}] 结论：❌ {message}")
             return {"site": domain, "success": False, "status": "no_cookie",
                     "message": message, "time": now}
+        logger.info(
+            f"【观众签到】[{domain}] 步骤 1/3 完成：Cookie 已取到（{len(cookie)} 字符）"
+            f"，UA {'已' if ua else '未'}提供"
+        )
 
         target_url = f"{site_url}/{self._attendance_path.lstrip('/')}"
 
         last_message = "签到未成功"
         for attempt in range(1, self._retry + 1):
+            if self._retry > 1:
+                logger.info(f"【观众签到】[{domain}] 步骤 2/3：执行签到（第 {attempt}/{self._retry} 次尝试）")
+            else:
+                logger.info(f"【观众签到】[{domain}] 步骤 2/3：执行签到")
+
             status, message = self._attempt_once(target_url, cookie, ua, site)
+
             if status in ("success", "already"):
-                logger.info(f"【观众签到】{domain} {message}")
+                logger.info(f"【观众签到】[{domain}] 步骤 2/3 完成：{message}")
+                logger.info(f"【观众签到】[{domain}] 步骤 3/3：写入历史记录")
+                if status == "success":
+                    logger.info(f"【观众签到】[{domain}] 结论：✅ 签到成功 —— {message}")
+                else:
+                    logger.info(f"【观众签到】[{domain}] 结论：✅ 今日已签到 —— {message}")
                 return {"site": domain, "success": True, "status": status,
                         "message": message, "time": now}
-            last_message = message
-            logger.warning(f"【观众签到】{domain} 第 {attempt} 次尝试失败：{message}")
 
-        logger.error(f"【观众签到】{domain} 签到未成功：{last_message}")
+            last_message = message
+            logger.warning(f"【观众签到】[{domain}] 步骤 2/3 第 {attempt} 次尝试失败：{message}")
+
+        logger.error(f"【观众签到】[{domain}] 结论：❌ 签到未成功 —— {last_message}")
         return {"site": domain, "success": False, "status": "failed",
                 "message": last_message, "time": now}
 
@@ -641,30 +812,38 @@ class AudiencesSignIn(_PluginBase):
         site: Any,
     ) -> Tuple[str, str]:
         """执行一次完整签到尝试：先 HTTP 探测，必要时再动用浏览器。"""
+        logger.info(f"【观众签到】  HTTP 探测签到状态：{target_url}")
         state, detail, body = self._probe_state(target_url, cookie, ua, site)
+        logger.info(f"【观众签到】  HTTP 探测结果：{state}（{detail}）")
 
         if state == "signed":
             reward = self._extract_reward(body)
+            logger.info("【观众签到】  判定：页面显示已签到，无需重复操作")
             return "already", f"今天已经签到过了{reward}"
 
         if state == "login":
+            logger.warning("【观众签到】  判定：Cookie 已失效，页面要求登录")
             return "failed", "Cookie 已失效（页面要求登录），请在站点管理中更新 Cookie"
 
         if state == "need_verify":
+            logger.info("【观众签到】  判定：站点要求人机验证，纯 HTTP 无法完成，需要浏览器")
             if not self._use_browser:
+                logger.error("【观众签到】  但「允许调用浏览器过人机验证」为关闭状态，无法继续")
                 return ("failed",
                         "站点要求人机验证，但插件已禁用浏览器调用；请在插件配置中开启"
                         "「允许调用浏览器过人机验证」")
             return self._sign_in_with_browser(target_url, cookie, ua, site)
 
         if state == "cloudflare":
+            logger.info("【观众签到】  判定：被 Cloudflare 质询拦截，改用浏览器处理")
             if not self._use_browser:
+                logger.error("【观众签到】  但「允许调用浏览器过人机验证」为关闭状态，无法继续")
                 return ("failed",
                         "被 Cloudflare 质询拦截且插件已禁用浏览器；"
                         "请更新站点 Cookie（建议包含 cf_clearance）或开启浏览器调用")
-            logger.info("【观众签到】HTTP 被 Cloudflare 质询拦截，改用浏览器处理")
             return self._sign_in_with_browser(target_url, cookie, ua, site)
 
+        logger.warning(f"【观众签到】  判定：状态无法识别 —— {detail}")
         return "failed", detail
 
     # ------------------------------------------------------------ HTTP 探测
@@ -771,6 +950,7 @@ class AudiencesSignIn(_PluginBase):
         try:
             from app.sdk.browser import launch_browser_context
         except ImportError as err:
+            logger.error(f"【观众签到】  宿主浏览器 SDK 不可用：{err}")
             return ("failed",
                     f"宿主浏览器 SDK 不可用（{err}）；请确认 MoviePilot 为 V3 且已启用浏览器能力")
 
@@ -790,17 +970,26 @@ class AudiencesSignIn(_PluginBase):
         else:
             modes = [True, False]
 
+        logger.info(
+            f"【观众签到】  启动浏览器过验证，模式序列："
+            f"{' → '.join(('无头' if m else '有头') for m in modes)}"
+            f"，等待上限 {self._browser_wait}s"
+        )
+
         last_message = "浏览器未能完成签到"
         for headless in modes:
             mode_label = "无头" if headless else "有头"
-            logger.info(f"【观众签到】以{mode_label}模式启动浏览器处理人机验证：{target_url}")
+            logger.info(f"【观众签到】  以「{mode_label}」模式启动浏览器加载签到页 ……")
             status, message = self._run_browser_once(
                 launch_browser_context, target_url, cookie, ua, proxies, headless, timeout
             )
             if status in ("success", "already"):
+                logger.info(f"【观众签到】  「{mode_label}」模式成功：{message}")
                 return status, f"{message}（{mode_label}浏览器）"
             last_message = message
-            logger.warning(f"【观众签到】{mode_label}模式未完成签到：{message}")
+            logger.warning(f"【观众签到】  「{mode_label}」模式未完成：{message}")
+            if len(modes) > 1 and headless:
+                logger.info("【观众签到】  自动回退到「有头」模式重试 ……")
 
         return "failed", last_message
 
@@ -830,32 +1019,54 @@ class AudiencesSignIn(_PluginBase):
                 pass
 
             page.goto(target_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            logger.info("【观众签到】  签到页已加载，开始轮询等待验证与签到结果 ……")
 
             deadline = time.time() + self._browser_wait
             last_state = "unknown"
             last_body = ""
+            tick = 0
+            heartbeat = 0
             while time.time() < deadline:
+                tick += 1
                 last_body = self._page_text(page)
                 if any(marker in last_body for marker in SIGNED_MARKERS):
                     reward = self._extract_reward(last_body)
+                    logger.info(f"【观众签到】  第 {tick} 次轮询检测到已签到标记")
                     return "success", f"签到成功{reward}"
                 if self._looks_like_login(last_body, ""):
+                    logger.warning(f"【观众签到】  第 {tick} 次轮询检测到跳转登录页")
                     return "failed", "浏览器加载后跳转到登录页，Cookie 已失效"
                 if any(marker in last_body for marker in NEED_VERIFY_MARKERS):
                     last_state = "need_verify"
                 elif self._looks_like_cloudflare(last_body):
                     last_state = "cloudflare"
+                # 每 15 秒输出一次心跳，避免长时间静默让人以为卡死
+                elapsed = int(time.time() - (deadline - self._browser_wait))
+                if elapsed - heartbeat >= 15:
+                    heartbeat = elapsed
+                    logger.info(
+                        f"【观众签到】  等待中 …… 已用 {elapsed}s / 上限 {self._browser_wait}s"
+                        f"（当前页面状态：{last_state}）"
+                    )
                 time.sleep(3)
 
             if last_state == "need_verify":
+                logger.error(
+                    f"【观众签到】  ⏱️ {self._browser_wait}s 内人机验证未通过"
+                    f"（已轮询 {tick} 次）"
+                )
                 return ("failed",
                         f"已加载签到页但 {self._browser_wait}s 内人机验证未通过；"
                         "可尝试切换为「仅有头」模式或延长等待时间")
             if last_state == "cloudflare":
+                logger.error(f"【观众签到】  ⏱️ {self._browser_wait}s 内未通过 Cloudflare 质询")
                 return "failed", f"{self._browser_wait}s 内未通过 Cloudflare 质询"
             snippet = (last_body or "")[:200].replace("\n", " ").strip()
+            logger.error(f"【观众签到】  ⏱️ {self._browser_wait}s 内未检测到签到结果")
+            logger.error(f"【观众签到】  页面片段：{snippet}")
             return "failed", f"浏览器未能在 {self._browser_wait}s 内完成签到，页面片段：{snippet}"
         except Exception as err:  # noqa: BLE001 - 浏览器异常统一归入失败
+            logger.error(f"【观众签到】  浏览器执行异常：{err}")
             return "failed", f"浏览器执行异常：{err}"
         finally:
             for closer in (page, context):
