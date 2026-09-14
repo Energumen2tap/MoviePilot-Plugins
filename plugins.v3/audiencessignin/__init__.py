@@ -1,6 +1,41 @@
 """
 观众（Audiences）PT 站自动签到插件 —— MoviePilot V3
 
+=== v1.5.3 变更（找到真正的签到入口：顶部用户栏）===
+用户实测澄清：
+
+    他在右上角的签到点一下（就是顶部用户信息栏那里），自动就完成了。
+    不需要在签到页里点任何东西，也不跳页、不弹窗。
+
+这句话推翻了前几版的一个根本假设 —— **签到入口不在 `attendance.php`，而在全站
+顶部用户栏**。前几版一直加载 `attendance.php` 然后在页内找按钮，方向就偏了：
+那个页面本身**不产生签到行为**，所以在里面怎么点、怎么等都不会有结果。
+
+实测结构（已签到态 HTML 反推）：
+  <div class="site-userbar__compact-actions">
+    <div class="site-userbar__compact-action-group">
+      未签到 → <a class="site-userbar__compact-tool" ...>签到</a>        ← 要点这个
+      已签到 → <span class="...--attended">已签到 +32</span>            ← 非可点元素
+      <a class="site-userbar__compact-tool" href="messages.php">收件箱</a>  ← 同名同 class！
+      <a class="site-userbar__compact-tool" href="...">发件箱</a>
+    </div>
+  </div>
+
+⚠️ **关键陷阱**：签到按钮与收件箱/发件箱是**兄弟节点且 class 完全相同**
+→ 绝不能"取容器内第一个可点元素"（会点到收件箱），必须**按「签到」语义筛选**。
+
+本版改动：
+  1. 加载页从 `attendance.php` 改为**站点首页 `index.php`**（顶部栏必然完整渲染，
+     最贴近真人操作；旧配置值 attendance.php 自动纠正为 index.php）；
+  2. `_click_sign_button` 重写：**新增最高优先级的"顶部用户栏签到元素"策略**，
+     并修掉旧策略 1「取签到卡片内首个可点元素」抢先返回的缺陷；
+  3. `isAttended` 收紧 —— 旧版用 `innerText` 读整条用户栏，会让「签到」被邻近的
+     「已签到」污染而误判；改为只读元素**自身直接文本** + 检查 `--attended` class；
+  4. 点击后**立即校验**（最多约 4 秒）—— 顶部栏签到是原地生效的，命中即可提前返回，
+     不必干等满 `_browser_wait`；
+  5. 新增 `_looks_like_unsigned()`：未签到的正向证据改为「顶部栏存在签到入口」，
+     不再依赖"加载的是不是签到页"。
+
 === v1.5.2 变更（修复「把未签到误判成已签到」）===
 v1.5.1 实跑日志报「✅ 今日已签到」，但用户去站点点签到却显示**刚签到成功**
 → 证明插件**根本没签到**，是被自身的兜底逻辑骗了。
@@ -29,12 +64,12 @@ v1.5.1 实跑日志报「✅ 今日已签到」，但用户去站点点签到却
                 文案：今天已签到 / 今日已签到，明天再来吧 / 请勿重复刷新
   签到成功       attendance-card--success / attendance-page--success
                 文案：签到成功 / 本次获得爆米花
-  未签到        只有 attendance-page（**无修饰符**）→ 应执行签到
+  未签到         顶部栏有「签到」链接（未签到态）；签到页为 attendance-page 无修饰符
   ============  ==========================================================
   ⚠️ ``attendance-page`` 是基类，**三态都有**，不能单独用它判定。
 
 新增状态 ``unsigned``：唯一需要真正执行签到动作的分支，走浏览器
-（点击按钮 + 完成验证），因为纯 HTTP 无法产生按钮交互与验证 widget。
+（顶部栏点击 + 完成验证），因为纯 HTTP 无法产生按钮交互与验证 widget。
 
 附带修正：``cdp.py cookies`` 取 HttpOnly Cookie 失败的问题
   ``Storage.getCookies`` 在 page target 上报
@@ -129,8 +164,41 @@ from app.sdk.logging import logger
 #: 默认签到站点（观众）
 DEFAULT_SITES = "audiences.me"
 
-#: 默认签到页相对路径（NexusPHP 标准打卡页）
-DEFAULT_ATTENDANCE_PATH = "attendance.php"
+#: 默认加载页相对路径 —— **站点首页**。
+#:
+#: ⚠️ v1.5.3 关键修正：**签到入口不在 `attendance.php`，而在全站顶部用户栏**。
+#: 用户实测确认：「点右上角的『签到』，原地变成『已签到 +32』，不跳页、不弹窗」。
+#: 顶部栏是全局组件（每个页面都渲染），因此加载任意页面都能点到；
+#: 但**加载首页 (`index.php`) 最贴近真人操作路径**，且首页必然带完整顶部栏，
+#: 不会出现"签到页自己有没有渲染顶部栏"这种不确定性。
+#: （旧版本加载 `attendance.php` 后干等 —— 那个页面本身不产生签到行为，等不到任何东西。）
+DEFAULT_SIGNIN_PATH = "index.php"
+
+#: 旧配置值兼容：历史用户配置里存的是 attendance.php
+LEGACY_ATTENDANCE_PATH = "attendance.php"
+
+#: 顶部用户栏容器的 CSS 选择器（实测原文）—— **仅供参考/排障用**。
+#:
+#: ⚠️ 实际点击逻辑在 `_click_sign_button` 的页面内 JS 里，选择器是**内联写死**的
+#: （JS 运行在浏览器里，取不到 Python 常量）。本常量用于人工排障与文档对照，
+#: 修改时务必**两处同步**。
+#:
+#: 站点实测结构（2026-09-14）：
+#:   <div class="site-userbar__compact-actions">
+#:     <div class="site-userbar__compact-action-group">
+#:       <!-- 未签到：<a ...>签到</a>；已签到：<span ...--attended>已签到 +32</span> -->
+#:       <a class="site-userbar__compact-tool" href="messages.php">收件箱</a>
+#:       <a class="site-userbar__compact-tool" href="messages.php?...">发件箱</a>
+#:     </div>
+#:   </div>
+#:
+#: ⚠️ 签到按钮与收件箱/发件箱是**兄弟节点**，都在同一个 group 里，
+#: 所以必须**按「签到」语义筛选**，绝不能"取容器内第一个可点元素"——
+#: 那会点到收件箱。
+SIGNIN_BUTTON_SELECTORS = (
+    ".site-userbar__compact-actions",
+    ".site-userbar__compact-action-group",
+)
 
 #: 判定「今天已经签过」的**结构标记**（HTML class 名，实测原文）。
 #:
@@ -148,7 +216,7 @@ SIGNED_STRUCTURE_MARKERS = (
     "attendance-card--success",              # 成功态的卡片修饰符
     "attendance-card--done",                 # 已签到态的卡片修饰符
     "attendance-card__icon--done",           # 已签到态的图标修饰符
-    "site-userbar__compact-tool--attended",  # 顶部栏「已签到」小标签
+    "site-userbar__compact-tool--attended",  # 顶部栏「已签到」小标签（全站可见，最稳）
 )
 
 #: 判定「未签到」的**结构标记**（HTML class 名，实测原文）。
@@ -249,7 +317,7 @@ class AudiencesSignIn(_PluginBase):
         "支持定时执行、手动触发、结果通知与历史记录。"
     )
     plugin_icon = "audiencessignin.png"
-    plugin_version = "1.5.2"
+    plugin_version = "1.5.3"
     plugin_author = "Energumen2tap"
     author_url = "https://github.com/Energumen2tap"
     plugin_config_prefix = "audiencessignin_"
@@ -261,7 +329,7 @@ class AudiencesSignIn(_PluginBase):
     _notify: bool = True
     _cron: str = ""
     _sites: List[str] = []
-    _attendance_path: str = DEFAULT_ATTENDANCE_PATH
+    _attendance_path: str = DEFAULT_SIGNIN_PATH
     _cookie_override: str = ""
     _ua_override: str = ""
     _retry: int = 1
@@ -284,9 +352,13 @@ class AudiencesSignIn(_PluginBase):
         self._notify = bool(config.get("notify", True))
         self._cron = str(config.get("cron") or "").strip()
         self._sites = self._parse_sites(config.get("sites"))
-        self._attendance_path = (
-            str(config.get("attendance_path") or "").strip() or DEFAULT_ATTENDANCE_PATH
-        )
+        # v1.5.3：签到入口在**全局顶部用户栏**，加载首页即可点到。
+        # 历史用户配置里可能仍是 attendance.php（旧默认值）→ 自动纠正为首页，
+        # 否则会在一个不产生签到行为的页面上白等。
+        configured_path = str(config.get("attendance_path") or "").strip()
+        if not configured_path or configured_path.lstrip("/") == LEGACY_ATTENDANCE_PATH:
+            configured_path = DEFAULT_SIGNIN_PATH
+        self._attendance_path = configured_path
         self._cookie_override = str(config.get("cookie") or "").strip()
         self._ua_override = str(config.get("ua") or "").strip()
         self._use_browser = bool(config.get("use_browser", True))
@@ -556,8 +628,10 @@ class AudiencesSignIn(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "attendance_path",
-                                            "label": "签到页路径",
-                                            "placeholder": "attendance.php",
+                                            "label": "签到入口页路径",
+                                            "placeholder": "index.php",
+                                            "hint": "签到按钮在站点顶部用户栏，加载首页即可点到；一般无需修改",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
@@ -793,7 +867,7 @@ class AudiencesSignIn(_PluginBase):
             "retry": 1,
             "sites": DEFAULT_SITES,
             "cron": "0 8 * * *",
-            "attendance_path": DEFAULT_ATTENDANCE_PATH,
+            "attendance_path": DEFAULT_SIGNIN_PATH,
             "use_browser": True,
             "browser_mode": BROWSER_MODE_AUTO,
             "browser_wait": 60,
@@ -1032,18 +1106,21 @@ class AudiencesSignIn(_PluginBase):
             return self._sign_in_with_browser(target_url, cookie, ua, site)
 
         if state == "unsigned":
-            # v1.5.2 新增：明确识别出「签到页初始态，尚未签到」。
+            # v1.5.2 新增 / v1.5.3 更新描述：明确识别出「今日尚未签到」。
             # 这是**唯一需要真正执行签到动作**的分支。
             #
-            # 为什么必须走浏览器：站点的人机验证是「点击签到按钮后才弹出」的，
-            # 纯 HTTP 请求拿不到按钮交互，也无法完成验证 widget。
-            # （用户实测确认：「他是点签到，然后自动开始验证。验证完之后才会显示签到成功。」）
-            logger.info("【观众签到】  判定：签到页初始态，今日尚未签到，需要执行签到动作")
+            # v1.5.3 起判定依据改为「顶部用户栏里有签到入口」，并且浏览器直接打开
+            # **站点首页**去点那个入口（用户实测：首页顶部栏点一下即原地签到完成）。
+            #
+            # 为什么必须走浏览器：站点签到在点击后要走人机验证流程，
+            # 纯 HTTP 请求既拿不到按钮交互，也无法完成验证 widget。
+            logger.info("【观众签到】  判定：今日尚未签到（顶部栏有签到入口），需要执行签到动作")
             if not self._use_browser:
                 logger.error("【观众签到】  但「允许调用浏览器过人机验证」为关闭状态，无法继续")
                 return ("failed",
                         "检测到今日尚未签到，但插件已禁用浏览器调用；"
-                        "签到需点击按钮并完成人机验证，请开启「允许调用浏览器过人机验证」")
+                        "签到需在站点顶部栏点击「签到」并完成人机验证，"
+                        "请开启「允许调用浏览器过人机验证」")
             return self._sign_in_with_browser(target_url, cookie, ua, site)
 
         logger.warning(f"【观众签到】  判定：状态无法识别 —— {detail}")
@@ -1129,7 +1206,7 @@ class AudiencesSignIn(_PluginBase):
         if signed_evidence:
             return "signed", f"页面显示今日已签到（命中：{signed_evidence}）", body
 
-        # 4) 未签到 —— 确认是签到页初始态后，交给调用方去执行签到动作。
+        # 4) 未签到 —— 交给调用方去执行签到动作。
         #
         #    ⚠️ v1.5.1 的「第 5 条防御性兜底」在此被**删除**。
         #    它原意是「登录态在 + 无验证文案 → 视为已签到」，但本地实跑证明该
@@ -1140,9 +1217,14 @@ class AudiencesSignIn(_PluginBase):
         #    教训：兜底若长期命中，就不再是兜底，而是主逻辑；一旦前提被站点改版
         #    破坏，它会安静地把错误结论报成成功。宁可 unknown（可观测），
         #    不要 signed（静默放过）。
-        if ATTENDANCE_PAGE_MARKER in (html or ""):
+        #
+        #    v1.5.3 判定依据更新：签到入口是**全站顶部用户栏**，所以「未签到」的
+        #    正向证据也应当是**顶部栏里存在「签到」按钮**（HTML 原文里能查到
+        #    site-userbar 容器 + 签到语义），而不再依赖加载的是不是签到页。
+        #    同时保留对 attendance.php 页面（旧路径/人工填了签到页路径）的兼容。
+        if self._looks_like_unsigned(html, body):
             return ("unsigned",
-                    "签到页初始态（有签到区、无已签到标记），需要执行签到",
+                    "页面为未签到态（顶部栏有「签到」入口、无已签到标记），需要执行签到",
                     body)
 
         # 5) 需要人机验证
@@ -1212,6 +1294,51 @@ class AudiencesSignIn(_PluginBase):
                 continue
 
         return ""
+
+    @staticmethod
+    def _looks_like_unsigned(html: str, body: str) -> bool:
+        """判断页面是否处于「今日尚未签到」状态（需要去执行签到）。
+
+        v1.5.3 新增 —— 判定依据从"是不是签到页"改为**"顶部用户栏里有没有签到入口"**。
+
+        实测事实（用户确认 + 已签到态样本反推）：
+
+        * 签到入口是**全站顶部用户栏**里的一个链接，两种状态：
+            - 未签到： ``<a class="site-userbar__compact-tool">签到</a>``
+            - 已签到： ``<span class="site-userbar__compact-tool--attended">已签到 +32</span>``
+        * 因此**"顶部栏存在签到入口"就是未签到的正向证据**，比"加载的是不是签到页"更可靠
+          —— 顶部栏每个页面都有，而签到页 `attendance.php` 本身不产生签到行为。
+
+        判定分两路（与 ``_match_signed`` 同样的载体规则）：
+
+        1. **结构路**：HTML 原文里出现 ``site-userbar`` 容器 **且** 不含 ``--attended`` 标记，
+           并且能查到签约语义的可点链接（``>签到<`` / ``attend``）。
+        2. **兼容路**：HTML 原文里出现 ``attendance-page`` 基类（用户手动把入口页
+           配成 `attendance.php` 时的旧场景）。
+
+        注意：本方法**必须在 ``_match_signed`` 之后调用** —— 已签到会被前面的判定拦下，
+        所以走到这里时"没有 attended 标记"本身就是一个有意义的证据。
+        """
+        raw = html or ""
+        if not raw:
+            return False
+
+        # 已签到的结构标记若还在，说明不该判 unsigned（双保险，调用方已先判过）
+        for marker in SIGNED_STRUCTURE_MARKERS:
+            if marker in raw:
+                return False
+
+        # 结构路：顶部用户栏存在 + 有签到语义的可点链接
+        if "site-userbar" in raw:
+            # 顶部栏里出现「签到」文案（未签到态）；已签到态该处是「已签到」，会被上面的排除
+            if re.search(r">\s*签到\s*<", raw) or re.search(r"attend", raw, re.IGNORECASE):
+                return True
+
+        # 兼容路：签到页基类（旧路径场景）
+        if ATTENDANCE_PAGE_MARKER in raw:
+            return True
+
+        return False
 
     @staticmethod
     def _looks_like_need_verify(body: str) -> bool:
@@ -1362,7 +1489,21 @@ class AudiencesSignIn(_PluginBase):
             logger.info("【观众签到】  首屏为未签到态，尝试点击「签到」按钮 ……")
             click_msg = self._click_sign_button(page)
             logger.info(f"【观众签到】  {click_msg}")
+
+            # ---- v1.5.3：点击后**立即校验** ----
+            # 实测：点顶部栏「签到」是原地生效的（无跳页、无弹窗），页面很快变成
+            # 「已签到 +32」。所以这里先短促等一小会儿再读一次，命中即提前返回，
+            # 不必等满整个 _browser_wait。
             if "已点击" in click_msg:
+                for _ in range(4):                     # 最多约 4 秒
+                    time.sleep(1)
+                    quick_html = self._page_html(page)
+                    quick_body = self._to_text(quick_html)
+                    quick_hit = self._match_signed(quick_html, quick_body)
+                    if quick_hit:
+                        reward = self._extract_reward(quick_body)
+                        logger.info(f"【观众签到】  点击后立即检测到已签到（{quick_hit}）")
+                        return "success", f"签到成功{reward}"
                 logger.info("【观众签到】  已触发签到，等待人机验证自动完成 ……")
             else:
                 logger.warning(
@@ -1673,63 +1814,107 @@ class AudiencesSignIn(_PluginBase):
     def _click_sign_button(page: Any) -> str:
         """在当前页面上寻找并点击「签到」按钮，返回结果说明。
 
-        v1.5.2 新增 —— 这是本版**最关键的行为修正**。
+        v1.5.3 重写 —— **签到入口在站点顶部用户栏，不在签到卡片里**。
 
-        站点改版后，人机验证不再随页面加载自动触发，而是
-        「**点击签到按钮 → 自动开始验证 → 验证通过 → 显示签到成功**」
-        （用户实测确认）。旧版本只加载页面然后干等，因此永远等不到结果。
+        用户实测确认（2026-09-14）：
+            点页面**右上角（顶部用户栏）的「签到」** → **原地变成「已签到 +32」**，
+            **不跳页、不弹窗**，签到就此完成。
 
-        按钮识别策略按优先级依次尝试，覆盖多种可能的实现方式：
-          1. ``attendance-card`` 等签到区内的 ``button`` / ``a`` / ``input[submit]``
-          2. 文本含「签到 / 打卡 / 领取」且**不含**「已签到」的可点元素
-          3. 含 ``attend`` 的 ``href`` / ``class`` / ``id`` 的可点元素
+        站点顶部栏两种状态（实测 HTML）：
+            未签到： ``<a class="site-userbar__compact-tool" ...>签到</a>``      ← 要点的
+            已签到： ``<span class="site-userbar__compact-tool--attended">
+                       已签到 +32</span>``                                     ← 非可点元素
 
-        为避免误点「已签到」标签（它也是链接），统一排除文本含「已签到」的元素。
+        ⚠️ **关键陷阱**：签到按钮与「收件箱 / 发件箱」是**兄弟节点**，同在
+        ``.site-userbar__compact-action-group`` 里，且 class 完全相同
+        （都是 ``site-userbar__compact-tool``）。
+        → 因此**绝不能"取容器内第一个可点元素"**，那会点到收件箱。
+        → 必须**按「签到」语义筛选**（文本命中 / href 命中）。
+
+        识别策略按优先级依次尝试（先精确后模糊）：
+          0. 顶部用户栏内的「签到」元素（**实测确认的真实入口，最高优先级**）
+          1. ``href`` / ``class`` / ``id`` 含 ``attend`` 的可点元素（全局）
+          2. 文本含「签到 / 打卡 / 领取」且不含「已签到」的可点元素（全局）
+          3. 签到卡片/页面区块内的可点元素（最后兜底，用于站点改回页内签到的情形）
+
+        统一排除已签到标记元素；只认**可见**元素（导航里常有同名隐藏链接）。
         """
         script = r"""
 (() => {
-  const out = {clicked: false, how: '', text: '', err: ''};
+  const out = {clicked: false, how: '', text: '', href: '', err: '', candidates: []};
   try {
     const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-    const txt = el => ((el.innerText || el.value || '') + '').trim();
-    const all = () => [...document.querySelectorAll('button, a, input[type=submit], input[type=button]')]
-                        .filter(visible);
 
-    const isAttended = el => /已签到|已打卡/.test(txt(el)) ||
-                            /--attended/.test((el.className || '').toString());
+    // 只取元素**自身的直接文本**（不含子元素文字），避免整条用户栏的文字混进来。
+    // v1.5.2 用 innerText 读整条栏 → 「签到」与邻近的「已签到」互相污染。
+    const ownText = el => {
+      let s = '';
+      for (const n of el.childNodes) {
+        if (n.nodeType === 3) s += n.nodeValue;            // 文本节点
+        else if (n.nodeType === 1 && /^(I|SVG)$/i.test(n.tagName)) continue; // 图标跳过
+      }
+      s = (s + ' ' + (el.value || '')).trim();
+      if (!s) s = ((el.getAttribute('aria-label') || '') + ' ' +
+                   (el.getAttribute('title') || '')).trim();  // 退回无障碍标签
+      return s;
+    };
 
+    const cls = el => ((el.className || '') + '').toString();
+    const isAttended = el =>
+      /--attended/.test(cls(el)) || /已签到|已打卡/.test(ownText(el));
+
+    const q = 'a, button, input[type=submit], input[type=button], form';
+    const all = () => [...document.querySelectorAll(q)].filter(visible);
+
+    // ---- 策略 0：顶部用户栏内的「签到」元素（实测确认的真实入口）----
     let target = null, how = '';
+    for (const box of document.querySelectorAll('.site-userbar__compact-actions, .site-userbar__compact-action-group, .site-userbar')) {
+      const cand = [...box.querySelectorAll(q)].filter(visible).filter(el => {
+        if (isAttended(el)) return false;
+        const t = ownText(el);
+        const h = (el.getAttribute('href') || '') + ' ' + cls(el) + ' ' + (el.id || '');
+        // 必须**确实是签到**：文本含签到/打卡/领取，或 href/class 指向 attendance
+        return /签到|打卡|领取/.test(t) || /attend/i.test(h);
+      });
+      if (cand.length) { target = cand[0]; how = '顶部用户栏内「签到」元素'; break; }
+    }
 
-    // 策略 1：签到卡片/页面区块内的可点元素
+    // ---- 策略 1：href / class / id 含 attend（全局）----
+    if (!target) {
+      const cand = all().filter(el => !isAttended(el) &&
+        /attend/i.test((el.getAttribute('href') || '') + ' ' + cls(el) + ' ' + (el.id || '')));
+      if (cand.length) { target = cand[0]; how = 'href/class/id 匹配 attend'; }
+    }
+
+    // ---- 策略 2：文本含「签到 / 打卡 / 领取」（全局）----
+    if (!target) {
+      const cand = all().filter(el => !isAttended(el) &&
+        /签到|打卡|领取|点击签到/.test(ownText(el) || el.textContent || ''));
+      if (cand.length) { target = cand[0]; how = '文本匹配「签到」'; }
+    }
+
+    // ---- 策略 3：签到卡片/页面区块内的可点元素（兜底）----
     if (!target) {
       for (const sel of ['.attendance-card', '.attendance-page', '.attendance-hero']) {
         const box = document.querySelector(sel);
         if (!box) continue;
-        const cand = [...box.querySelectorAll('button, a, input[type=submit], input[type=button]')]
-                       .filter(visible).filter(el => !isAttended(el));
+        const cand = [...box.querySelectorAll(q)].filter(visible).filter(el => !isAttended(el));
         if (cand.length) { target = cand[0]; how = sel + ' 内首个可点元素'; break; }
       }
     }
 
-    // 策略 2：文本含 签到/打卡/领取 且不是「已签到」
-    if (!target) {
-      const cand = all().filter(el => !isAttended(el) &&
-                    /签到|打卡|领取|领取奖励|点击签到/.test(txt(el)));
-      if (cand.length) { target = cand[0]; how = '文本匹配「签到」'; }
-    }
-
-    // 策略 3：href / class / id 含 attend
-    if (!target) {
-      const cand = all().filter(el => !isAttended(el) &&
-                    /attend/i.test((el.getAttribute('href') || '') + ' ' +
-                                   (el.className || '') + ' ' + (el.id || '')));
-      if (cand.length) { target = cand[0]; how = 'href/class/id 匹配 attend'; }
-    }
+    // 始终把用户栏里所有可点元素的「自身文本」记录下来，便于排障对照
+    try {
+      const bar = document.querySelector('.site-userbar__compact-actions');
+      if (bar) out.candidates = [...bar.querySelectorAll(q)].filter(visible)
+                                  .map(el => ownText(el).slice(0, 20)).filter(Boolean);
+    } catch (e) { /* 记录失败不影响点击 */ }
 
     if (!target) { out.err = '未找到可点的签到按钮'; return out; }
 
-    out.text = txt(target).slice(0, 80);
-    target.scrollIntoView({block: 'center'});
+    out.text = (ownText(target) || target.textContent || '').trim().slice(0, 80);
+    out.href = target.getAttribute('href') || '';
+    try { target.scrollIntoView({block: 'center'}); } catch (e) { /* 用户栏本就可见 */ }
     target.click();
     out.clicked = true;
     out.how = how;
@@ -1745,8 +1930,13 @@ class AudiencesSignIn(_PluginBase):
         if not isinstance(result, dict):
             return f"点击签到按钮返回异常结果：{result!r}"
         if result.get("clicked"):
-            return f"已点击签到按钮（{result.get('how')}，按钮文本：{result.get('text') or '(空)'}）"
-        return f"未找到签到按钮（{result.get('err') or '未知原因'}）"
+            detail = f"{result.get('how')}，按钮文本：{result.get('text') or '(空)'}"
+            if result.get("href"):
+                detail += f"，href={result.get('href')}"
+            return f"已点击签到按钮（{detail}）"
+        cand = result.get("candidates") or []
+        extra = f"；用户栏内可点元素文本={cand}" if cand else ""
+        return f"未找到签到按钮（{result.get('err') or '未知原因'}）{extra}"
 
     @staticmethod
     def _safe_attr(page: Any, name: str) -> str:
