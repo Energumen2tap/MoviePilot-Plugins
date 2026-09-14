@@ -1,0 +1,41 @@
+# 运行期与敏感文件（对齐 MoviePilot 官方发布规范，禁止提交）
+.env
+.env.*
+config/
+data/
+cache/
+logs/
+tmp/
+*.secret
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# 数据与日志
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.bak
+*.tmp
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+node_modules/
