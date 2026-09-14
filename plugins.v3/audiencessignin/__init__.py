@@ -1,6 +1,49 @@
 """
 观众（Audiences）PT 站自动签到插件 —— MoviePilot V3
 
+=== v1.5.2 变更（修复「把未签到误判成已签到」）===
+v1.5.1 实跑日志报「✅ 今日已签到」，但用户去站点点签到却显示**刚签到成功**
+→ 证明插件**根本没签到**，是被自身的兜底逻辑骗了。
+
+本地实跑（Edge + 带登录态 profile，抓取真实页面）确诊两处根因：
+
+根因 1 —— 兜底逻辑有害（v1.5.1 第 5 条）：
+  原规则「登录态在 + 无未签到标记 → 视为已签到」的前提**是错的**。
+  站点改版后人机验证改成「**点击签到按钮之后才弹出**」，因此未签到态页面上
+  根本没有任何验证文案，而登录信息（收件箱/发件箱）却一应俱全
+  → 兜底条件被满足 → 未签到被静默判成已签到，直接跳过签到动作。
+  **本版删除该兜底**，改为明确返回 ``unsigned``（可观测、会去签到），
+  无法识别时保守返回 ``unknown``。教训：兜底若长期命中就不再是兜底。
+
+根因 2 —— 结构标记查错了地方：
+  v1.5.1 打算「改用 CSS class 判定」，但把 class 串也塞进 ``_to_text()`` 的
+  **纯文本**里查 —— 标签已被剥掉，所以那些串**永远匹配不到**。
+  本版新增 ``_match_signed()`` 分三路判定：
+    ① 结构标记（class 名）→ 查 **HTML 原文**
+    ② 文案标记            → 查 **纯文本**
+    ③ 正则模式（``已签到 +32``）→ 查纯文本
+
+站点三态实测（2026-09-14 本地实跑定为基线）：
+  ============  ==========================================================
+  已签到         attendance-card--done / site-userbar__compact-tool--attended
+                文案：今天已签到 / 今日已签到，明天再来吧 / 请勿重复刷新
+  签到成功       attendance-card--success / attendance-page--success
+                文案：签到成功 / 本次获得爆米花
+  未签到        只有 attendance-page（**无修饰符**）→ 应执行签到
+  ============  ==========================================================
+  ⚠️ ``attendance-page`` 是基类，**三态都有**，不能单独用它判定。
+
+新增状态 ``unsigned``：唯一需要真正执行签到动作的分支，走浏览器
+（点击按钮 + 完成验证），因为纯 HTTP 无法产生按钮交互与验证 widget。
+
+附带修正：``cdp.py cookies`` 取 HttpOnly Cookie 失败的问题
+  ``Storage.getCookies`` 在 page target 上报
+  ``browserContextId is only allowed for Browser target``，
+  而原回退判断 ``if "error" in result`` 写法不对（CDP 错误在**顶层**，
+  不在 ``result`` 里）→ 回退未触发 → 拿到空 Cookie → 纯 HTTP 403。
+  正确做法：直接用 ``Network.getAllCookies``（实测可稳定取到
+  ``cf_clearance``，len=597）。
+
 === v1.5.1 变更（修复 unknown 解析缺陷）===
 v1.5.0 实跑出现「HTTP 200 但四组判定词全未命中」→ 状态 unknown，
 且日志正文片段以 ``--> --> -->`` 一堆 HTML 注释残余符开头
@@ -89,7 +132,40 @@ DEFAULT_SITES = "audiences.me"
 #: 默认签到页相对路径（NexusPHP 标准打卡页）
 DEFAULT_ATTENDANCE_PATH = "attendance.php"
 
-#: 判定「今天已经签过」的文案（实测原文，来自真实页面）
+#: 判定「今天已经签过」的**结构标记**（HTML class 名，实测原文）。
+#:
+#: ⚠️ v1.5.2 关键修正：类名只存在于 **HTML 原文**，`_to_text()` 会把标签剥掉，
+#: 所以在**纯文本**里查这些串**永远失败** —— 必须拿 HTML 原文查。
+#: 这是 v1.5.1「改用类名判定」失败的原因。
+#:
+#: 站点三态实测对照（2026-09-14 本地实跑）：
+#:   已签到   → attendance-card--done / site-userbar__compact-tool--attended
+#:   签到成功 → attendance-card--success / attendance-page--success
+#:   未签到   → 只有 attendance-page（无修饰符）
+#: 因此 **attendance-page 这个基类三态都有，绝不能用它单独判定**。
+SIGNED_STRUCTURE_MARKERS = (
+    "attendance-page--success",              # 成功态的页面级修饰符
+    "attendance-card--success",              # 成功态的卡片修饰符
+    "attendance-card--done",                 # 已签到态的卡片修饰符
+    "attendance-card__icon--done",           # 已签到态的图标修饰符
+    "site-userbar__compact-tool--attended",  # 顶部栏「已签到」小标签
+)
+
+#: 判定「未签到」的**结构标记**（HTML class 名，实测原文）。
+#: 只要出现其中之一，就说明页面是签到页的**初始态**，应当去执行签到。
+ATTENDANCE_PAGE_MARKER = "attendance-page"
+
+#: 判定「今天已经签过」的**文案**（实测原文，来自真实页面）。
+#:
+#: ⚠️ 只能拿 `_to_text()` 的**纯文本**结果查这些串（不是 HTML 原文）。
+#: 已签到态实测命中的组合：
+#:   顶部栏        已签到 +32
+#:   hero 副标题   今日已签到，明天再来吧
+#:   卡片标题      今天已签到
+#:   卡片说明      您今天已经签到过了，请勿重复刷新。
+#: 签到成功态实测命中：
+#:   卡片标题      签到成功
+#:   统计标签      本次获得爆米花
 SIGNED_MARKERS = (
     "今日已签到",
     "今天已签到",
@@ -99,6 +175,16 @@ SIGNED_MARKERS = (
     "请勿重复刷新",
     "签到成功",
     "打卡成功",
+)
+
+#: 判定「今天已经签过」的**正则模式**（在纯文本上匹配）。
+#:
+#: 顶部栏渲染为 `<strong>已签到</strong><span>+32</span>`，转纯文本后是
+#: 「已签到 +32」。单看「已签到」二字过于宽泛（可能出现在按钮上），
+#: 所以要求后面紧跟 `+数字` 才认定为「已签到奖励」。
+SIGNED_REGEX_MARKERS = (
+    r"已签到\s*\+\s*\d+",
+    r"本次获得\s*\+\s*\d+",
 )
 
 #: 判定「需要人机验证」的文案（实测原文）
@@ -163,7 +249,7 @@ class AudiencesSignIn(_PluginBase):
         "支持定时执行、手动触发、结果通知与历史记录。"
     )
     plugin_icon = "audiencessignin.png"
-    plugin_version = "1.5.1"
+    plugin_version = "1.5.2"
     plugin_author = "Energumen2tap"
     author_url = "https://github.com/Energumen2tap"
     plugin_config_prefix = "audiencessignin_"
@@ -945,6 +1031,21 @@ class AudiencesSignIn(_PluginBase):
                         "请更新站点 Cookie（建议包含 cf_clearance）或开启浏览器调用")
             return self._sign_in_with_browser(target_url, cookie, ua, site)
 
+        if state == "unsigned":
+            # v1.5.2 新增：明确识别出「签到页初始态，尚未签到」。
+            # 这是**唯一需要真正执行签到动作**的分支。
+            #
+            # 为什么必须走浏览器：站点的人机验证是「点击签到按钮后才弹出」的，
+            # 纯 HTTP 请求拿不到按钮交互，也无法完成验证 widget。
+            # （用户实测确认：「他是点签到，然后自动开始验证。验证完之后才会显示签到成功。」）
+            logger.info("【观众签到】  判定：签到页初始态，今日尚未签到，需要执行签到动作")
+            if not self._use_browser:
+                logger.error("【观众签到】  但「允许调用浏览器过人机验证」为关闭状态，无法继续")
+                return ("failed",
+                        "检测到今日尚未签到，但插件已禁用浏览器调用；"
+                        "签到需点击按钮并完成人机验证，请开启「允许调用浏览器过人机验证」")
+            return self._sign_in_with_browser(target_url, cookie, ua, site)
+
         logger.warning(f"【观众签到】  判定：状态无法识别 —— {detail}")
         return "failed", detail
 
@@ -959,7 +1060,13 @@ class AudiencesSignIn(_PluginBase):
     ) -> Tuple[str, str, str]:
         """用宿主 HTTP 栈读取签到页并判定状态，返回 (状态, 说明, 页面文本)。
 
-        状态取值：signed / need_verify / login / cloudflare / unknown
+        状态取值：
+          signed      —— 今日已签到（结构标记或文案命中）
+          unsigned    —— 签到页初始态、今日尚未签到，**需要执行签到动作**（v1.5.2 新增）
+          need_verify —— 页面明确要求人机验证
+          login       —— Cookie 失效
+          cloudflare  —— 被 Cloudflare 质询
+          unknown     —— 结果无法识别（保守返回，**绝不假装成功**）
         """
         try:
             from app.sdk.network import RequestUtils, SiteUtils
@@ -1012,30 +1119,37 @@ class AudiencesSignIn(_PluginBase):
             return "login", "Cookie 已失效（页面为登录页）", body
 
         # 3) 已签到（必须先于任何「成功」判定，避免被页面常驻文案误导）
-        if any(marker in body for marker in SIGNED_MARKERS):
-            return "signed", "页面显示今日已签到", body
+        #
+        #    v1.5.2 关键修正（本地实跑确诊）：
+        #    判定必须**分两路**做 ——
+        #      结构标记（class 名）→ 查 **HTML 原文**（纯文本里已被剥掉，查不到）
+        #      文案标记            → 查 **纯文本**
+        #    v1.5.1 把两者都塞进 `body`（纯文本）里查，导致所有 class 类判定恒假。
+        signed_evidence = self._match_signed(html, body)
+        if signed_evidence:
+            return "signed", f"页面显示今日已签到（命中：{signed_evidence}）", body
 
-        # 4) 需要人机验证
+        # 4) 未签到 —— 确认是签到页初始态后，交给调用方去执行签到动作。
+        #
+        #    ⚠️ v1.5.1 的「第 5 条防御性兜底」在此被**删除**。
+        #    它原意是「登录态在 + 无验证文案 → 视为已签到」，但本地实跑证明该
+        #    前提是**错的**：站点改版后人机验证改成「点击签到按钮后才弹出」，
+        #    未签到态页面上根本没有任何验证文案，同时登录信息（收件箱/发件箱）
+        #    却一应俱全 → 兜底条件被满足 → **把未签到误判成已签到**，
+        #    直接跳过签到动作，成为静默失败的根源。
+        #    教训：兜底若长期命中，就不再是兜底，而是主逻辑；一旦前提被站点改版
+        #    破坏，它会安静地把错误结论报成成功。宁可 unknown（可观测），
+        #    不要 signed（静默放过）。
+        if ATTENDANCE_PAGE_MARKER in (html or ""):
+            return ("unsigned",
+                    "签到页初始态（有签到区、无已签到标记），需要执行签到",
+                    body)
+
+        # 5) 需要人机验证
         #    ⚠️ 不能只看关键词：这三个词是站点页面上的**静态说明文案**，
         #    只要页面渲染出来就可能被读到。必须配合「页面不含登录用户信息」才成立。
         if self._looks_like_need_verify(body):
             return "need_verify", "站点要求人机验证，需由浏览器完成", body
-
-        # 5) 防御性兜底（v1.5.1）：无法识别，但「登录态在 + 页面没有我认识的
-        #    未签到标记」→ 实际几乎可以肯定是「今天已经签过，只是站点换了文案」。
-        #    依据：本站未签到时页面**一定**出现 NEED_VERIFY_MARKERS 之一，
-        #    所以「登录态在 且 无验证文案」这一组合在未签到时无法成立。
-        #    这样处理的目的：把「误报失败」降级为「多发一次浏览器确认」，
-        #    而不是每天误报一次失败 —— 两种错误代价不对称。
-        if any(marker in body for marker in LOGGED_IN_MARKERS):
-            logger.info(
-                "【观众签到】  判定：登录态正常但未命中已知签到文案，"
-                "按站点规则视为今日已签到（若判断有误，下次执行会以浏览器复核）"
-            )
-            return ("signed",
-                    "未命中已知签到文案，但登录态正常且页面无验证提示，"
-                    "按站点规则视为今日已签到",
-                    body)
 
         snippet = body[:200].replace("\n", " ").strip()
         # v1.5.1：unknown 时补充「文本长度 + 中段 + 尾段」证据。
@@ -1053,6 +1167,51 @@ class AudiencesSignIn(_PluginBase):
             tail = body[-200:].replace("\n", " ").strip()
             logger.warning(f"【观众签到】  正文尾段：{tail}")
         return "unknown", f"结果无法识别（HTTP {status_code}），页面片段：{snippet}", body
+
+    @staticmethod
+    def _match_signed(html: str, body: str) -> str:
+        """判断页面是否处于「今日已签到」状态，返回命中的证据名（未命中返回空串）。
+
+        **必须分两路查**（v1.5.2 本地实跑确诊的要点）：
+
+        * 结构标记（CSS class 名）只在 **HTML 原文**里存在 ——
+          `_to_text()` 会把 `<div class="attendance-card--done">` 整体剥成
+          空白，所以在纯文本里搜这些串**永远匹配不到**。
+        * 文案标记则相反，必须拿 **纯文本** 查 ——
+          在 HTML 原文里查也能命中，但容易撞上注释、属性值（如 `title="(签到已得32)"`
+          或 `<!-- ...已签到... -->`），不如纯文本干净。
+
+        站点三态实测（2026-09-14）：
+        ============  ==========================================
+        已签到         attendance-card--done / --attended
+                       + 文案「今天已签到」「请勿重复刷新」
+        签到成功        attendance-card--success / attendance-page--success
+                       + 文案「签到成功」「本次获得爆米花」
+        未签到         只有 attendance-page（无修饰符），应去签到
+        ============  ==========================================
+        """
+        raw_html = html or ""
+        text = body or ""
+
+        # --- 第一路：结构标记，查 HTML 原文 ---
+        for marker in SIGNED_STRUCTURE_MARKERS:
+            if marker in raw_html:
+                return f"结构标记 {marker}"
+
+        # --- 第二路：文案标记，查纯文本 ---
+        for marker in SIGNED_MARKERS:
+            if marker in text:
+                return f"文案「{marker}」"
+
+        # --- 第三路：正则模式（覆盖「已签到 +32」这类带数值的渲染）---
+        for pattern in SIGNED_REGEX_MARKERS:
+            try:
+                if re.search(pattern, text):
+                    return f"模式 /{pattern}/"
+            except re.error:  # pragma: no cover - 常量写错时保护
+                continue
+
+        return ""
 
     @staticmethod
     def _looks_like_need_verify(body: str) -> bool:
@@ -1186,10 +1345,34 @@ class AudiencesSignIn(_PluginBase):
 
             page.goto(target_url, wait_until="domcontentloaded", timeout=timeout * 1000)
             self._log_browser_page(page, "首屏已加载")
-            logger.info("【观众签到】  签到页已加载，开始轮询等待验证与签到结果 ……")
+
+            # ---- 关键：主动点击「签到」按钮（v1.5.2 行为修正）----
+            #
+            # 站点现在的人机验证是**点击后才触发**的，不会随页面加载自动开始。
+            # 旧版本只加载页面然后干等，永远等不到「签到成功」。
+            # 顺序：先读一次状态（已签到就直接返回）→ 未签到则点击 → 再轮询验证结果。
+            pre_html = self._page_html(page)
+            pre_body = self._to_text(pre_html)
+            pre_evidence = self._match_signed(pre_html, pre_body)
+            if pre_evidence:
+                reward = self._extract_reward(pre_body)
+                logger.info(f"【观众签到】  首屏即为已签到态（{pre_evidence}），无需点击")
+                return "success", f"今天已经签到过了{reward}"
+
+            logger.info("【观众签到】  首屏为未签到态，尝试点击「签到」按钮 ……")
+            click_msg = self._click_sign_button(page)
+            logger.info(f"【观众签到】  {click_msg}")
+            if "已点击" in click_msg:
+                logger.info("【观众签到】  已触发签到，等待人机验证自动完成 ……")
+            else:
+                logger.warning(
+                    "【观众签到】  ⚠️ 未能点到签到按钮，将只做被动等待；"
+                    "若站点改版请反馈页面结构以便适配"
+                )
 
             deadline = time.time() + self._browser_wait
             last_state = "unknown"
+            last_html = ""
             last_body = ""
             last_url = ""
             last_title = ""
@@ -1197,28 +1380,40 @@ class AudiencesSignIn(_PluginBase):
             tick = 0
             heartbeat = 0
             evidence_logged = False
+            clicked = "已点击" in click_msg
+            reclick_at = time.time() + 12 if clicked else 0
             while time.time() < deadline:
                 tick += 1
-                last_body = self._page_text(page)
+                last_html = self._page_html(page)
+                last_body = self._to_text(last_html)
                 last_url = self._safe_attr(page, "url")
                 last_title = self._safe_call(page, "title")
-                if any(marker in last_body for marker in SIGNED_MARKERS):
+
+                # 判定已签到：结构标记查 HTML、文案查纯文本（v1.5.2 两路并查）
+                hit = self._match_signed(last_html, last_body)
+                if hit:
                     reward = self._extract_reward(last_body)
-                    logger.info(f"【观众签到】  第 {tick} 次轮询检测到已签到标记")
+                    logger.info(f"【观众签到】  第 {tick} 次轮询检测到已签到（{hit}）")
                     return "success", f"签到成功{reward}"
+
                 if self._looks_like_login(last_body, ""):
                     logger.warning(f"【观众签到】  第 {tick} 次轮询检测到跳转登录页")
                     self._log_browser_page(page, "跳转登录页")
                     return "failed", "浏览器加载后跳转到登录页，Cookie 已失效"
+
+                # 已点击但过了一段时间仍未成功 → 补点一次，应对验证弹层遮挡/首次点击落空
+                if clicked and reclick_at and time.time() >= reclick_at:
+                    reclick_at = 0
+                    retry_msg = self._click_sign_button(page)
+                    logger.info(f"【观众签到】  第 {tick} 次轮询补点签到：{retry_msg}")
+
                 if self._looks_like_need_verify(last_body):
                     last_state = "need_verify"
                 elif self._looks_like_cloudflare(last_body):
                     last_state = "cloudflare"
-                elif any(marker in last_body for marker in LOGGED_IN_MARKERS):
-                    # 登录信息在、但没匹配到任何「已签到」文案 → 页面结构可能变了，
-                    # 记为 unknown 而不是 need_verify，避免再次误判成验证问题
-                    last_state = "unknown"
                 else:
+                    # 注意：这里**不再**把「登录信息在」当作已签到的迹象。
+                    # v1.5.1 的兜底正是栽在这个推断上 —— 未签到态同样有登录信息。
                     last_state = "unknown"
                 if not first_state:
                     first_state = last_state
@@ -1460,6 +1655,98 @@ class AudiencesSignIn(_PluginBase):
             except Exception:  # noqa: BLE001 - 页面切换中读取失败属常见情况
                 continue
         return ""
+
+    @staticmethod
+    def _page_html(page: Any) -> str:
+        """读取页面**HTML 原文**，失败返回空字符串。
+
+        v1.5.2 新增：``_page_text()`` 返回的是剥完标签的纯文本，class 类判定
+        （``attendance-card--done`` 等）在里面查不到。判定已签到需要**两路并查**，
+        因此这里单独提供 HTML 原文读取。
+        """
+        try:
+            return page.content() or ""
+        except Exception:  # noqa: BLE001 - 页面切换中读取失败属常见情况
+            return ""
+
+    @staticmethod
+    def _click_sign_button(page: Any) -> str:
+        """在当前页面上寻找并点击「签到」按钮，返回结果说明。
+
+        v1.5.2 新增 —— 这是本版**最关键的行为修正**。
+
+        站点改版后，人机验证不再随页面加载自动触发，而是
+        「**点击签到按钮 → 自动开始验证 → 验证通过 → 显示签到成功**」
+        （用户实测确认）。旧版本只加载页面然后干等，因此永远等不到结果。
+
+        按钮识别策略按优先级依次尝试，覆盖多种可能的实现方式：
+          1. ``attendance-card`` 等签到区内的 ``button`` / ``a`` / ``input[submit]``
+          2. 文本含「签到 / 打卡 / 领取」且**不含**「已签到」的可点元素
+          3. 含 ``attend`` 的 ``href`` / ``class`` / ``id`` 的可点元素
+
+        为避免误点「已签到」标签（它也是链接），统一排除文本含「已签到」的元素。
+        """
+        script = r"""
+(() => {
+  const out = {clicked: false, how: '', text: '', err: ''};
+  try {
+    const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const txt = el => ((el.innerText || el.value || '') + '').trim();
+    const all = () => [...document.querySelectorAll('button, a, input[type=submit], input[type=button]')]
+                        .filter(visible);
+
+    const isAttended = el => /已签到|已打卡/.test(txt(el)) ||
+                            /--attended/.test((el.className || '').toString());
+
+    let target = null, how = '';
+
+    // 策略 1：签到卡片/页面区块内的可点元素
+    if (!target) {
+      for (const sel of ['.attendance-card', '.attendance-page', '.attendance-hero']) {
+        const box = document.querySelector(sel);
+        if (!box) continue;
+        const cand = [...box.querySelectorAll('button, a, input[type=submit], input[type=button]')]
+                       .filter(visible).filter(el => !isAttended(el));
+        if (cand.length) { target = cand[0]; how = sel + ' 内首个可点元素'; break; }
+      }
+    }
+
+    // 策略 2：文本含 签到/打卡/领取 且不是「已签到」
+    if (!target) {
+      const cand = all().filter(el => !isAttended(el) &&
+                    /签到|打卡|领取|领取奖励|点击签到/.test(txt(el)));
+      if (cand.length) { target = cand[0]; how = '文本匹配「签到」'; }
+    }
+
+    // 策略 3：href / class / id 含 attend
+    if (!target) {
+      const cand = all().filter(el => !isAttended(el) &&
+                    /attend/i.test((el.getAttribute('href') || '') + ' ' +
+                                   (el.className || '') + ' ' + (el.id || '')));
+      if (cand.length) { target = cand[0]; how = 'href/class/id 匹配 attend'; }
+    }
+
+    if (!target) { out.err = '未找到可点的签到按钮'; return out; }
+
+    out.text = txt(target).slice(0, 80);
+    target.scrollIntoView({block: 'center'});
+    target.click();
+    out.clicked = true;
+    out.how = how;
+  } catch (e) { out.err = String(e); }
+  return out;
+})()
+"""
+        try:
+            result = page.evaluate(script)
+        except Exception as err:  # noqa: BLE001 - 浏览器能力差异
+            return f"点击签到按钮失败：{err}"
+
+        if not isinstance(result, dict):
+            return f"点击签到按钮返回异常结果：{result!r}"
+        if result.get("clicked"):
+            return f"已点击签到按钮（{result.get('how')}，按钮文本：{result.get('text') or '(空)'}）"
+        return f"未找到签到按钮（{result.get('err') or '未知原因'}）"
 
     @staticmethod
     def _safe_attr(page: Any, name: str) -> str:
