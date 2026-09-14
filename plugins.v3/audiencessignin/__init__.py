@@ -78,10 +78,26 @@ SIGNED_MARKERS = (
 )
 
 #: 判定「需要人机验证」的文案（实测原文）
+#:
+#: ⚠️ 注意（v1.5.0 实测教训）：这三个词是站点**页面上的静态说明文案**
+#: （签到奖励规则区块附近），只要页面渲染出来就可能被 `inner_text` 读到。
+#: 因此**不能**单独作为 need_verify 的依据 —— 必须配合「页面不含登录用户信息」
+#: 才成立（见 `_looks_like_need_verify`）。
 NEED_VERIFY_MARKERS = (
     "人机验证",
     "验证通过后将自动完成签到",
     "完成人机验证即可",
+)
+
+#: 登录用户已登录的**强特征**：页面头部渲染了用户名/分享率等个人信息。
+#: 这些内容只有通过鉴权的会话才会出现，是「登录态确实生效」的最可靠证据。
+#: 一旦命中，即可断定当前不是「未登录 → 被要求验证」的场景。
+LOGGED_IN_MARKERS = (
+    "分享率",
+    "收件箱",
+    "发件箱",
+    "控制面板",
+    "我的用户名",
 )
 
 #: 判定 Cookie 失效的强特征
@@ -123,7 +139,7 @@ class AudiencesSignIn(_PluginBase):
         "支持定时执行、手动触发、结果通知与历史记录。"
     )
     plugin_icon = "audiencessignin.png"
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     plugin_author = "Energumen2tap"
     author_url = "https://github.com/Energumen2tap"
     plugin_config_prefix = "audiencessignin_"
@@ -961,11 +977,34 @@ class AudiencesSignIn(_PluginBase):
             return "signed", "页面显示今日已签到", body
 
         # 4) 需要人机验证
-        if any(marker in body for marker in NEED_VERIFY_MARKERS):
+        #    ⚠️ 不能只看关键词：这三个词是站点页面上的**静态说明文案**，
+        #    只要页面渲染出来就可能被读到。必须配合「页面不含登录用户信息」才成立。
+        if self._looks_like_need_verify(body):
             return "need_verify", "站点要求人机验证，需由浏览器完成", body
 
         snippet = body[:200].replace("\n", " ").strip()
         return "unknown", f"结果无法识别（HTTP {status_code}），页面片段：{snippet}", body
+
+    @staticmethod
+    def _looks_like_need_verify(body: str) -> bool:
+        """判断页面是否**真的**在要求人机验证。
+
+        v1.5.0 关键修正：``NEED_VERIFY_MARKERS`` 里的三个词是站点页面的**静态文案**，
+        在任何状态下都可能出现在 DOM / 可见文本里（实测：已登录且已签到的页面上
+        也会被 ``inner_text`` 读到）。若拿它单独判定，就会把**已签到的成功页面**
+        误判成「需要人机验证」，进而白等 60 秒并报失败。
+
+        因此这里加一道**登录态反证**：页面若渲染出了只有登录用户才看得到的信息
+        （分享率 / 收件箱 / 控制面板 等），说明会话有效，就不可能是「未登录 → 被要求验证」。
+        """
+        if not any(marker in (body or "") for marker in NEED_VERIFY_MARKERS):
+            return False
+        # 已被任何一条「已签到」或「登录用户信息」特征证伪 → 不是 need_verify
+        if any(marker in (body or "") for marker in SIGNED_MARKERS):
+            return False
+        if any(marker in (body or "") for marker in LOGGED_IN_MARKERS):
+            return False
+        return True
 
     @staticmethod
     def _looks_like_cloudflare(body: str) -> bool:
@@ -975,9 +1014,16 @@ class AudiencesSignIn(_PluginBase):
 
     @staticmethod
     def _looks_like_login(body: str, html: str) -> bool:
-        """判断页面是否为登录页；要求「签到」字样缺席，避免误判签到页。"""
+        """判断页面是否为登录页；要求「签到」字样缺席，避免误判签到页。
+
+        v1.5.0 增加登录态反证：页面若已渲染出登录用户信息（分享率 / 收件箱等），
+        即使正文里出现「请先登录」之类的通用提示文案，也不认定为登录页。
+        """
         if "takelogin.php" in (html or ""):
             return True
+        # 已登录的反证：能看到登录用户信息 → 肯定不是登录页
+        if any(marker in (body or "") for marker in LOGGED_IN_MARKERS):
+            return False
         if any(marker in body for marker in LOGIN_MARKERS):
             return True
         if "签到" in body:
@@ -1095,10 +1141,14 @@ class AudiencesSignIn(_PluginBase):
                     logger.warning(f"【观众签到】  第 {tick} 次轮询检测到跳转登录页")
                     self._log_browser_page(page, "跳转登录页")
                     return "failed", "浏览器加载后跳转到登录页，Cookie 已失效"
-                if any(marker in last_body for marker in NEED_VERIFY_MARKERS):
+                if self._looks_like_need_verify(last_body):
                     last_state = "need_verify"
                 elif self._looks_like_cloudflare(last_body):
                     last_state = "cloudflare"
+                elif any(marker in last_body for marker in LOGGED_IN_MARKERS):
+                    # 登录信息在、但没匹配到任何「已签到」文案 → 页面结构可能变了，
+                    # 记为 unknown 而不是 need_verify，避免再次误判成验证问题
+                    last_state = "unknown"
                 else:
                     last_state = "unknown"
                 if not first_state:
@@ -1323,12 +1373,21 @@ class AudiencesSignIn(_PluginBase):
 
     @staticmethod
     def _page_text(page: Any) -> str:
-        """读取页面可见文本，失败时返回空字符串。"""
-        for action in ("inner_text", "content"):
+        """读取页面文本，失败时返回空字符串。
+
+        v1.5.0 调整顺序：**优先用 `content()`（整份 HTML）转文本**，再退回 `inner_text`。
+        原因：`inner_text` 只返回**可见**文本，受浏览器窗口尺寸与 CSS 影响，
+        无头模式下底部内容可能被判为不可见 —— 会导致同一页面在不同模式下
+        读到不同文本，判定结果不稳定（v1.4.0 的误判即与此有关）。
+        """
+        for action in ("content", "inner_text"):
             try:
-                if action == "inner_text":
-                    return page.inner_text("body") or ""
-                return AudiencesSignIn._to_text(page.content() or "")
+                if action == "content":
+                    html = page.content() or ""
+                    if html:
+                        return AudiencesSignIn._to_text(html)
+                    continue
+                return page.inner_text("body") or ""
             except Exception:  # noqa: BLE001 - 页面切换中读取失败属常见情况
                 continue
         return ""
@@ -1354,6 +1413,8 @@ class AudiencesSignIn(_PluginBase):
         """把浏览器当前页面的关键证据写入日志，用于定位「浏览器到底看到了什么」。
 
         记录：地址、标题、判定命中的关键词、正文片段。
+        v1.5.0 增强：对每个命中词额外打印**上下游 80 字上下文**，
+        这样能立刻分辨「关键词是静态说明文案」还是「真的在要求验证」。
         """
         try:
             url = self._safe_attr(page, "url")
@@ -1361,7 +1422,8 @@ class AudiencesSignIn(_PluginBase):
             body = self._page_text(page)
             hits = [
                 marker
-                for group in (SIGNED_MARKERS, NEED_VERIFY_MARKERS, LOGIN_MARKERS, CF_MARKERS)
+                for group in (SIGNED_MARKERS, NEED_VERIFY_MARKERS, LOGIN_MARKERS,
+                              CF_MARKERS, LOGGED_IN_MARKERS)
                 for marker in group
                 if marker.lower() in body.lower()
             ]
@@ -1371,8 +1433,25 @@ class AudiencesSignIn(_PluginBase):
                 f"｜命中关键词={hits or '无'}｜正文长度={len(body)}"
             )
             logger.info(f"【观众签到】  [{label}] 正文片段：{snippet or '(空)'}")
+            # 命中上下文：只在「可疑词」命中时打印，避免日志刷屏
+            for marker in NEED_VERIFY_MARKERS:
+                ctx = self._marker_context(body, marker)
+                if ctx:
+                    logger.info(
+                        f"【观众签到】  [{label}] 「{marker}」上下文：…{ctx}…"
+                    )
         except Exception as err:  # noqa: BLE001 - 诊断失败不影响主流程
             logger.debug(f"【观众签到】记录浏览器页面证据失败：{err}")
+
+    @staticmethod
+    def _marker_context(body: str, marker: str, span: int = 80) -> str:
+        """返回关键词在正文中的上下游片段（用于判断它是静态文案还是真实提示）。"""
+        if not body or marker not in body:
+            return ""
+        idx = body.find(marker)
+        start = max(0, idx - span)
+        end = min(len(body), idx + len(marker) + span)
+        return body[start:end].replace("\n", " ").strip()
 
     # ------------------------------------------------------------ 工具方法
 
