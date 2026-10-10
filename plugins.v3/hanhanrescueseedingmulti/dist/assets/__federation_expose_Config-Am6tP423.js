@@ -88,9 +88,15 @@ async function saveConfig() {
   error.value = null;
 
   try {
-    // 合并多个执行时间（cron/cron2/cron3），非空项用分号连接
-    const cronParts = [config.cron, config.cron2, config.cron3].map(s => (s || '').trim()).filter(Boolean);
-    config.cron = cronParts.join(';');
+    // 合并多个执行时间（cron/cron2/cron3），非空项用分号连接；合并后清空附加框防重复叠加
+    const cronParts = [config.cron, config.cron2, config.cron3]
+      .flatMap(s => (s || '').split(';'))
+      .map(s => s.trim())
+      .filter(Boolean);
+    const dedup = [...new Set(cronParts)];
+    config.cron = dedup.join(';');
+    config.cron2 = '';
+    config.cron3 = '';
 
     // 发送保存事件
     emit('save', { ...config });

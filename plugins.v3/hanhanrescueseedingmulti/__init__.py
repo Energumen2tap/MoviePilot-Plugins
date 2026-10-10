@@ -168,6 +168,15 @@ class HanHanRescueSeedingMulti(_PluginBase):
     def load_config(self, config: dict):
         """加载配置"""
         if config:
+            # 兜底：若存在附加执行时间（cron2/cron3）且未合并进 cron，则合并（分号分隔）
+            extra = [str(config.get(k) or "").strip() for k in ("cron2", "cron3")]
+            extra = [e for e in extra if e]
+            if extra:
+                base_parts = [p.strip() for p in re.split(r"[\n;；|]+", str(config.get("cron") or "")) if p.strip()]
+                merged = base_parts + [e for e in extra if e not in base_parts]
+                config["cron"] = ";".join(merged)
+                config["cron2"] = ""
+                config["cron3"] = ""
             # 遍历配置中的键并设置相应的属性
             for key in (
                     "enable",
@@ -200,10 +209,19 @@ class HanHanRescueSeedingMulti(_PluginBase):
     def _get_config(self) -> Dict[str, Any]:
         """API Endpoint: Returns current plugin configuration."""
 
+        # 将合并存储的 cron（分号分隔）拆分回 3 个输入框，避免页面回显叠加
+        cron_parts = re.split(r"[\n;；|]+", str(self._cron or ""))
+        cron_parts = [p.strip() for p in cron_parts if p.strip()]
+        cron1 = cron_parts[0] if len(cron_parts) > 0 else ""
+        cron2 = cron_parts[1] if len(cron_parts) > 1 else ""
+        cron3 = cron_parts[2] if len(cron_parts) > 2 else ""
+
         return {
             "enable": self._enable,
             "run_once": self._run_once,
-            "cron": self._cron,
+            "cron": cron1,
+            "cron2": cron2,
+            "cron3": cron3,
             "downloader": self._downloader,
             "seeding_count": self._seeding_count,
             "torrent_size": self._torrent_size,
