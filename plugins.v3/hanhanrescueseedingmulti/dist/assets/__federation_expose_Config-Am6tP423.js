@@ -40,6 +40,8 @@ const defaultConfig = {
   name: '憨憨保种区多时间版',
   enable: false,
   cron: '',
+  cron2: '',
+  cron3: '',
   downloader: '',
   seeding_count: '1-3',
   torrent_size: '',
@@ -86,6 +88,10 @@ async function saveConfig() {
   error.value = null;
 
   try {
+    // 合并多个执行时间（cron/cron2/cron3），非空项用分号连接
+    const cronParts = [config.cron, config.cron2, config.cron3].map(s => (s || '').trim()).filter(Boolean);
+    config.cron = cronParts.join(';');
+
     // 发送保存事件
     emit('save', { ...config });
   } catch (err) {
@@ -341,6 +347,36 @@ return (_ctx, _cache) => {
                           "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((config.cron) = $event)),
                           label: "执行周期",
                           hint: "设置插件的执行周期，如：0 2 * * * (每天凌晨2点执行)",
+                          "persistent-hint": ""
+                        }, null, 8 /* PROPS */, ["modelValue"])
+                      ]),
+                      _: 1 /* STABLE */
+                    }),
+                    _createVNode(_component_v_col, {
+                      cols: "12",
+                      md: "6"
+                    }, {
+                      default: _withCtx(() => [
+                        _createVNode(_component_VCronField, {
+                          modelValue: config.cron2,
+                          "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((config.cron2) = $event)),
+                          label: "执行周期 2（可选）",
+                          hint: "第二个执行时间，不需要就留空",
+                          "persistent-hint": ""
+                        }, null, 8 /* PROPS */, ["modelValue"])
+                      ]),
+                      _: 1 /* STABLE */
+                    }),
+                    _createVNode(_component_v_col, {
+                      cols: "12",
+                      md: "6"
+                    }, {
+                      default: _withCtx(() => [
+                        _createVNode(_component_VCronField, {
+                          modelValue: config.cron3,
+                          "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((config.cron3) = $event)),
+                          label: "执行周期 3（可选）",
+                          hint: "第三个执行时间，不需要就留空",
                           "persistent-hint": ""
                         }, null, 8 /* PROPS */, ["modelValue"])
                       ]),
