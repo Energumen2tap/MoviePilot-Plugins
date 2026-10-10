@@ -48,6 +48,8 @@ class HanHanRescueSeedingMulti(_PluginBase):
     _enable = False
     _run_once = False
     _cron = None
+    _cron2 = None
+    _cron3 = None
     _downloader = None
     _seeding_count = None
     _torrent_size = None
@@ -84,6 +86,8 @@ class HanHanRescueSeedingMulti(_PluginBase):
                 self._enable = config.get("enable", False)
                 self._run_once = config.get("run_once", False)
                 self._cron = config.get("cron")
+                self._cron2 = config.get("cron2")
+                self._cron3 = config.get("cron3")
                 self._downloader = config.get("downloader", None)
                 self._seeding_count = config.get("seeding_count", "1-3")
                 self._torrent_size = config.get("torrent_size", "")
@@ -152,6 +156,8 @@ class HanHanRescueSeedingMulti(_PluginBase):
             "enable": self._enable,
             "run_once": self._run_once,
             "cron": self._cron,
+            "cron2": self._cron2,
+            "cron3": self._cron3,
             "downloader": self._downloader,
             "seeding_count": self._seeding_count,
             "download_limit": self._download_limit,
@@ -168,20 +174,13 @@ class HanHanRescueSeedingMulti(_PluginBase):
     def load_config(self, config: dict):
         """加载配置"""
         if config:
-            # 兜底：若存在附加执行时间（cron2/cron3）且未合并进 cron，则合并（分号分隔）
-            extra = [str(config.get(k) or "").strip() for k in ("cron2", "cron3")]
-            extra = [e for e in extra if e]
-            if extra:
-                base_parts = [p.strip() for p in re.split(r"[\n;；|]+", str(config.get("cron") or "")) if p.strip()]
-                merged = base_parts + [e for e in extra if e not in base_parts]
-                config["cron"] = ";".join(merged)
-                config["cron2"] = ""
-                config["cron3"] = ""
             # 遍历配置中的键并设置相应的属性
             for key in (
                     "enable",
                     "run_once",
                     "cron",
+                    "cron2",
+                    "cron3",
                     "downloader",
                     "seeding_count",
                     "torrent_size",
@@ -209,19 +208,12 @@ class HanHanRescueSeedingMulti(_PluginBase):
     def _get_config(self) -> Dict[str, Any]:
         """API Endpoint: Returns current plugin configuration."""
 
-        # 将合并存储的 cron（分号分隔）拆分回 3 个输入框，避免页面回显叠加
-        cron_parts = re.split(r"[\n;；|]+", str(self._cron or ""))
-        cron_parts = [p.strip() for p in cron_parts if p.strip()]
-        cron1 = cron_parts[0] if len(cron_parts) > 0 else ""
-        cron2 = cron_parts[1] if len(cron_parts) > 1 else ""
-        cron3 = cron_parts[2] if len(cron_parts) > 2 else ""
-
         return {
             "enable": self._enable,
             "run_once": self._run_once,
-            "cron": cron1,
-            "cron2": cron2,
-            "cron3": cron3,
+            "cron": self._cron,
+            "cron2": self._cron2,
+            "cron3": self._cron3,
             "downloader": self._downloader,
             "seeding_count": self._seeding_count,
             "torrent_size": self._torrent_size,
@@ -418,25 +410,21 @@ class HanHanRescueSeedingMulti(_PluginBase):
         """
         services = []
         if self._enable and self._cron:
-            # 支持多个执行时间：表达式之间用换行、分号（中/英文）或竖线分隔，
-            # 每个表达式独立注册一个定时服务。例如：
-            #   11 14 * * *;30 15 * * *
-            # 或
-            #   11 14 * * *
-            #   30 15 * * *
-            # 即每天 14:11 和 15:30 各运行一次
-            cron_parts = re.split(r"[\n;；|]+", str(self._cron))
-            cron_lines = [part.strip() for part in cron_parts if part.strip()]
-            if not cron_lines:
-                cron_lines = [str(self._cron).strip()]
-            for idx, cron_line in enumerate(cron_lines):
-                try:
-                    trigger = CronTrigger.from_crontab(cron_line)
-                except Exception as err:
-                    logger.error(f"憨憨保种区：cron 表达式无效，已跳过：{cron_line}（{str(err)}）")
+            # 三个执行时间各自独立：填了哪个就注册哪个，没填的不注册，互不合并
+            cron_slots = [
+                ("HanHanRescueSeedingMulti", "憨憨保种区多时间版服务", self._cron),
+                ("HanHanRescueSeedingMulti2", "憨憨保种区多时间版服务2", self._cron2),
+                ("HanHanRescueSeedingMulti3", "憨憨保种区多时间版服务3", self._cron3),
+            ]
+            for service_id, service_name, cron_expr in cron_slots:
+                expr = str(cron_expr or "").strip()
+                if not expr:
                     continue
-                service_id = "HanHanRescueSeedingMulti" if idx == 0 else f"HanHanRescueSeedingMulti_{idx + 1}"
-                service_name = "憨憨保种区多时间版服务" if idx == 0 else f"憨憨保种区多时间版服务{idx + 1}"
+                try:
+                    trigger = CronTrigger.from_crontab(expr)
+                except Exception as err:
+                    logger.error(f"憨憨保种区多时间版：{service_name} 的 cron 表达式无效，已跳过：{expr}（{str(err)}）")
+                    continue
                 services.append({
                     "id": service_id,
                     "name": service_name,
