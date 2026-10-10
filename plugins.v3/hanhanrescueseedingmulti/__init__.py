@@ -21,23 +21,23 @@ from app.sdk.services import DownloaderHelper, ServiceConfigHelper
 from torrentool.torrent import Torrent
 
 
-class HanHanRescueSeeding(_PluginBase):
+class HanHanRescueSeedingMulti(_PluginBase):
     # 插件名称
-    plugin_name = "憨憨保种区"
+    plugin_name = "憨憨保种区多时间版"
     # 插件描述
-    plugin_desc = "拯救憨憨保种区"
+    plugin_desc = "憨憨保种区多时间点版：支持一次配置多个执行时间（fork 自 Seed680/憨憨保种区）"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/wikrin/MoviePilot-Plugins/main/icons/alter_1.png"
     # 插件版本
-    plugin_version = "2.1.0"
+    plugin_version = "1.0.0"
     # 插件作者
     plugin_author = "Seed680"
     # 作者主页
     author_url = "https://github.com/Seed680"
     # 插件配置项ID前缀
-    plugin_config_prefix = "hanhanrescueseeding_"
+    plugin_config_prefix = "hanhanrescueseedingmulti_"
     # 加载顺序
-    plugin_order = 16
+    plugin_order = 17
     # 可使用的用户级别
     auth_level = 2
 
@@ -120,12 +120,12 @@ class HanHanRescueSeeding(_PluginBase):
                 # 添加普通保种任务
                 if self._run_once:
                     self._run_once = False
-                    logger.info("立即运行拯救憨憨保种区")
+                    logger.info("立即运行憨憨保种区多时间版")
                     self._scheduler.add_job(self._check_seeding, 'date',
                                             run_date=datetime.datetime.now(
                                                 tz=pytz.timezone(settings.TZ)
                                             ) + datetime.timedelta(seconds=3),
-                                            name="拯救憨憨保种区")
+                                            name="运行憨憨保种区多时间版")
 
                 # 添加历史保种任务
                 if self._history_rescue_enabled and self._user_id:
@@ -135,7 +135,7 @@ class HanHanRescueSeeding(_PluginBase):
                                             run_date=datetime.datetime.now(
                                                 tz=pytz.timezone(settings.TZ)
                                             ) + datetime.timedelta(seconds=3),
-                                            name="拯救憨憨保种区历史任务")
+                                            name="运行憨憨保种区多时间版历史任务")
 
                 if self._scheduler.get_jobs():
                     # 启动服务
@@ -400,12 +400,15 @@ class HanHanRescueSeeding(_PluginBase):
         """
         services = []
         if self._enable and self._cron:
-            # 支持多行 cron：每行一个独立的 cron 表达式，各注册一个定时服务
-            # 例如同时填写：
+            # 支持多个执行时间：表达式之间用换行、分号（中/英文）或竖线分隔，
+            # 每个表达式独立注册一个定时服务。例如：
+            #   11 14 * * *;30 15 * * *
+            # 或
             #   11 14 * * *
             #   30 15 * * *
             # 即每天 14:11 和 15:30 各运行一次
-            cron_lines = [line.strip() for line in str(self._cron).splitlines() if line.strip()]
+            cron_parts = re.split(r"[\n;；|]+", str(self._cron))
+            cron_lines = [part.strip() for part in cron_parts if part.strip()]
             if not cron_lines:
                 cron_lines = [str(self._cron).strip()]
             for idx, cron_line in enumerate(cron_lines):
@@ -414,8 +417,8 @@ class HanHanRescueSeeding(_PluginBase):
                 except Exception as err:
                     logger.error(f"憨憨保种区：cron 表达式无效，已跳过：{cron_line}（{str(err)}）")
                     continue
-                service_id = "HanHanRescueSeeding" if idx == 0 else f"HanHanRescueSeeding_{idx + 1}"
-                service_name = "憨憨保种区服务" if idx == 0 else f"憨憨保种区服务{idx + 1}"
+                service_id = "HanHanRescueSeedingMulti" if idx == 0 else f"HanHanRescueSeedingMulti_{idx + 1}"
+                service_name = "憨憨保种区多时间版服务" if idx == 0 else f"憨憨保种区多时间版服务{idx + 1}"
                 services.append({
                     "id": service_id,
                     "name": service_name,
@@ -640,7 +643,7 @@ class HanHanRescueSeeding(_PluginBase):
                 if self._notify_on_zero_torrents or success_downloaded_count > 0:
                     self.post_message(
                         mtype=NotificationType.Plugin,
-                        title="【憨憨保种区】",
+                        title="【憨憨保种区多时间版】",
                         text=f"成功拯救了 {success_downloaded_count} 个种子"
                     )
         except Exception as e:
@@ -649,7 +652,7 @@ class HanHanRescueSeeding(_PluginBase):
             if self._enable_notification:
                 self.post_message(
                     mtype=NotificationType.Plugin,
-                    title="【憨憨保种区】",
+                    title="【憨憨保种区多时间版】",
                     text=f"保种任务执行异常，请查看日志了解详情"
                 )
 
@@ -1031,7 +1034,7 @@ class HanHanRescueSeeding(_PluginBase):
             if self._enable_notification:
                 self.post_message(
                     mtype=NotificationType.Plugin,
-                    title="【憨憨保种区-历史任务】",
+                    title="【憨憨保种区多时间版-历史任务】",
                     text=f"历史保种任务完成: 成功 {success_downloaded_count}, 失败 {failed_downloaded_count}"
                 )
 
@@ -1041,7 +1044,7 @@ class HanHanRescueSeeding(_PluginBase):
             if self._enable_notification:
                 self.post_message(
                     mtype=NotificationType.Plugin,
-                    title="【憨憨保种区-历史任务】",
+                    title="【憨憨保种区多时间版-历史任务】",
                     text=f"历史保种任务执行异常，请查看日志了解详情"
                 )
 

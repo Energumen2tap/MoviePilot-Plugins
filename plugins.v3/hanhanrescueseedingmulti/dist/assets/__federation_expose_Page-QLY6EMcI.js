@@ -1119,7 +1119,7 @@ const $toast = useToast();
 const props = __props;
 
 // 组件状态
-const title = ref('憨憨保种区');
+const title = ref('憨憨保种区多时间版');
 const loading = ref(true);
 const deleting = ref(false);
 const error = ref(null);
@@ -1211,7 +1211,7 @@ async function refreshData() {
 
   try {
     // 获取下载记录
-    const response = await props.api.get(`plugin/HanHanRescueSeeding/download_records`);
+    const response = await props.api.get(`plugin/HanHanRescueSeedingMulti/download_records`);
     if (!response.success) {
       throw new Error(response.message || '获取下载记录失败')
     }
@@ -1275,7 +1275,7 @@ async function deleteMultipleRecords(recordTitles) {
   if (recordsWithHash.length > 0) {
     const hashes = recordsWithHash.map(record => record.torrent_hash);
     try {
-      const response = await props.api.post(`plugin/HanHanRescueSeeding/delete_torrents`, hashes);
+      const response = await props.api.post(`plugin/HanHanRescueSeedingMulti/delete_torrents`, hashes);
       if (!response.success) {
         console.error('删除种子失败:', response.message);
         $toast.error('删除种子失败: ' + (response.message || '未知错误'));
@@ -1293,7 +1293,7 @@ async function deleteMultipleRecords(recordTitles) {
 
   // 同时调用后端API删除数据库中的记录
   try {
-    const response = await props.api.post(`plugin/HanHanRescueSeeding/delete_download_records`, titles);
+    const response = await props.api.post(`plugin/HanHanRescueSeedingMulti/delete_download_records`, titles);
     if (!response.success) {
       console.error('删除下载记录失败:', response.message);
       $toast.error('删除下载记录失败: ' + (response.message || '未知错误'));

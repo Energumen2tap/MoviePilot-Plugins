@@ -21,19 +21,18 @@
    "v1.0.0": "首次发布。支持观众站点定时/手动签到、结果通知与历史记录。"
   }
  },
- "HanHanRescueSeeding": {
-  "name": "憨憨保种区",
-  "description": "拯救憨憨保种区（fork 自 Seed680，支持多时间点定时运行）",
+ "HanHanRescueSeedingMulti": {
+  "name": "憨憨保种区多时间版",
+  "description": "憨憨保种区的多时间点版本（fork 自 Seed680/憨憨保种区并独立命名，与原版可并存）：运行时间支持一次配置多个时间点（用分号、竖线或换行分隔多个 cron 表达式），各自独立注册定时任务，适合在保种资源分批上新时多次拉取。其余功能与原版 2.0.0 一致。",
   "labels": "保种",
-  "version": "2.1.0",
+  "version": "1.0.0",
   "icon": "https://raw.githubusercontent.com/Seed680/MoviePilot-Plugins/main/icons/customplugin.png",
   "author": "Seed680,Energumen2tap",
   "level": 2,
   "release": true,
   "system_version": ">=3.0.0",
   "history": {
-   "v2.1.0": "定时支持多行 cron：运行时间输入框可填多个时间点（每行一个 cron 表达式），各自独立注册定时任务。例如填 11 14 * * * 和 30 15 * * * 两行，即每天 14:11 与 15:30 各拉取一次保种区；无效行自动跳过并记录日志。",
-   "v2.0.0": "适配 MoviePilot V3（上游 Seed680 原版）"
+   "v1.0.0": "基于 Seed680/憨憨保种区 v2.0.0 fork 并独立命名（插件ID：HanHanRescueSeedingMulti，与原版可同时安装、互不影响）。新增：运行时间支持多个 cron 表达式，用分号(;)、竖线(|)或换行分隔，例如 11 14 * * *;30 15 * * * 表示每天 14:11 和 15:30 各执行一次，每个表达式独立注册定时任务，无效表达式自动跳过并记录日志。与原版的差异仅此一项，其余逻辑（保种人数/体积筛选、下载器、通知、历史记录等）与原版 2.0.0 完全一致。"
   }
  }
 }
