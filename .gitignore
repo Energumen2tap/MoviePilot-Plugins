@@ -39,3 +39,7 @@ Thumbs.db
 .idea/
 .vscode/
 node_modules/
+
+# 插件自带的 Vue 构建产物目录需要随插件发布（官方市场同样提交）
+!plugins.v3/**/dist/
+!plugins.v3/**/dist/**
